@@ -19,6 +19,20 @@ import {
 import { sandboxExec, sandboxWriteFile } from "./builtin/sandbox";
 import { visionInspect } from "./builtin/vision";
 import { webFetch, webSearch } from "./builtin/web";
+import {
+  SYSTEM_SKILLS,
+  decisionRecord,
+  decisionReview,
+  graphQuery,
+  imageGenerate,
+  missionPropose,
+  toolsCreate,
+  toolsReview,
+  watchAdd,
+} from "./builtin/v3";
+import { customSkillById, customSkillsFor } from "../tools/custom";
+import { mcpSkillById, mcpSkillsFor } from "../mcp/skills";
+import type { MemoryStore } from "../memory/store";
 import type { Skill } from "./types";
 
 /** Every skill the council can use. Which agent may use which is set in agents/registry.ts. */
@@ -50,11 +64,35 @@ export const SKILLS: Skill[] = [
   browserInspect,
   browserTest,
   browserScreenshot,
+  decisionRecord,
+  decisionReview,
+  graphQuery,
+  watchAdd,
+  toolsCreate,
+  toolsReview,
+  imageGenerate,
+  missionPropose,
 ];
 
-const BY_ID = new Map(SKILLS.map((s) => [s.id, s]));
+const BY_ID = new Map([...SKILLS, ...SYSTEM_SKILLS].map((s) => [s.id, s]));
 
 export function getSkill(id: string): Skill | undefined {
+  return BY_ID.get(id);
+}
+
+/** Built-in skills plus the agent's MCP connector tools and council-built tools. */
+export async function resolveSkills(agent: AgentId, env: Env, store: MemoryStore, opts: { consultDepth?: number } = {}): Promise<Skill[]> {
+  const [mcp, custom] = await Promise.all([
+    mcpSkillsFor(agent, env).catch(() => [] as Skill[]),
+    customSkillsFor(agent, env, store).catch(() => [] as Skill[]),
+  ]);
+  return [...skillsFor(agent, env, opts), ...mcp, ...custom];
+}
+
+/** Any skill by id, including dynamic ones (used when an approval is executed). */
+export async function findSkillById(env: Env, store: MemoryStore, id: string): Promise<Skill | undefined> {
+  if (id.startsWith("mcp.")) return mcpSkillById(env, id);
+  if (id.startsWith("custom.")) return customSkillById(env, store, id);
   return BY_ID.get(id);
 }
 

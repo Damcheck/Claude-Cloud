@@ -37,3 +37,11 @@ export function estimateSpeechMs(text: string): number {
   const words = speechText(text).split(/\s+/).filter(Boolean).length;
   return Math.min(60_000, 800 + (words / 2.6) * 1000);
 }
+
+/** Phone playback: sentence groups as raw 8 kHz μ-law, in order. */
+export async function* phoneSpeechStream(ai: Ai, agent: AgentId, markdown: string, opts?: CallOptions): AsyncGenerator<Uint8Array> {
+  const chunks = speechChunks(speechText(markdown));
+  const pending = chunks.map((text) => speak(ai, SYSTEM_MODELS.textToSpeech, text, { speaker: AGENTS[agent].voice, format: "mulaw-8k" }, opts));
+  for (const p of pending) p.catch(() => {});
+  for (const p of pending) yield await p;
+}

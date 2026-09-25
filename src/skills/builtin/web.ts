@@ -37,6 +37,7 @@ export const webFetch: Skill = {
     required: ["url"],
   },
   risk: "read",
+  untrusted: true,
   async run(args) {
     const url = parseHttpUrl(args.url);
     if (!url) return "Invalid URL: only http(s) URLs are allowed.";
@@ -88,6 +89,7 @@ export const webSearch: Skill = {
     required: ["query"],
   },
   risk: "read",
+  untrusted: true,
   available: (env) => !!(env.FIRECRAWL_API_KEY || env.BRAVE_API_KEY),
   async run(args, ctx) {
     const query = str(args.query).trim();

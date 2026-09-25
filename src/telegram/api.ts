@@ -14,6 +14,13 @@ export interface TelegramUpdate {
     message?: TelegramMessage;
     data?: string;
   };
+  message_reaction?: {
+    chat: { id: number; type: string };
+    message_id: number;
+    user?: { id: number; is_bot: boolean };
+    old_reaction: { type: string; emoji?: string }[];
+    new_reaction: { type: string; emoji?: string }[];
+  };
 }
 
 export interface TelegramMessage {
@@ -118,6 +125,42 @@ export function parseCallback(update: TelegramUpdate, viaAgent: AgentId): Callba
     data: cq.data,
     viaAgent,
   };
+}
+
+const POSITIVE = ["👍", "❤", "❤️", "🔥", "🎉", "👏", "💯", "🤩", "🏆", "⚡", "🙏", "👌", "😍"];
+const NEGATIVE = ["👎", "💩", "🤮", "😡", "🤡", "🥱", "😴", "🤨", "😐"];
+
+export function reactionScore(emoji: string): number {
+  if (POSITIVE.includes(emoji)) return 1;
+  if (NEGATIVE.includes(emoji)) return -1;
+  return 0;
+}
+
+export interface ReactionEvent {
+  convId: number;
+  chatId: number;
+  fromId: number;
+  messageId: number;
+  emoji: string;
+  score: number;
+}
+
+/** Newly added emoji reactions (the founder's feedback on an agent's message). */
+export function parseReactions(update: TelegramUpdate, viaAgent: AgentId): ReactionEvent[] {
+  const r = update.message_reaction;
+  if (!r?.user || r.user.is_bot) return [];
+  const old = new Set(r.old_reaction.map((x) => x.emoji));
+  const isPrivate = r.chat.type === "private";
+  return r.new_reaction
+    .filter((x) => x.type === "emoji" && x.emoji && !old.has(x.emoji))
+    .map((x) => ({
+      convId: isPrivate ? dmConvId(r.user!.id, viaAgent) : r.chat.id,
+      chatId: r.chat.id,
+      fromId: r.user!.id,
+      messageId: r.message_id,
+      emoji: x.emoji!,
+      score: reactionScore(x.emoji!),
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -252,13 +295,24 @@ export async function sendVoiceAs(env: Env, agent: AgentId, chatId: number, ogg:
   return sent.message_id;
 }
 
-export async function sendPhotoAs(env: Env, agent: AgentId, chatId: number, image: Uint8Array, caption?: string): Promise<void> {
+/** Returns the file_id of the largest size Telegram stored, so the image can be fetched again later. */
+export async function sendPhotoAs(env: Env, agent: AgentId, chatId: number, image: Uint8Array, caption?: string): Promise<string | undefined> {
   const { token } = tokenFor(env, agent);
   const form = new FormData();
   form.set("chat_id", String(chatId));
-  form.set("photo", new Blob([image], { type: "image/png" }), "screenshot.png");
+  form.set("photo", new Blob([image], { type: "image/png" }), "image.png");
   if (caption) form.set("caption", caption.slice(0, LIMITS.telegramMaxCaption));
-  await callMultipart(token, "sendPhoto", form);
+  const sent = await callMultipart<{ photo?: { file_id: string; width: number; height: number }[] }>(token, "sendPhoto", form);
+  return sent.photo?.reduce((a, b) => (b.width * b.height > a.width * a.height ? b : a)).file_id;
+}
+
+export async function sendDocumentAs(env: Env, agent: AgentId, chatId: number, name: string, content: string, caption?: string): Promise<void> {
+  const { token } = tokenFor(env, agent);
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  form.set("document", new Blob([content], { type: "text/markdown" }), name);
+  if (caption) form.set("caption", caption.slice(0, LIMITS.telegramMaxCaption));
+  await callMultipart(token, "sendDocument", form);
 }
 
 export async function sendTyping(env: Env, agent: AgentId, chatId: number, action: "typing" | "record_voice" = "typing"): Promise<void> {

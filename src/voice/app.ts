@@ -73,7 +73,7 @@ input { flex:1; border-radius:999px; border:1px solid color-mix(in srgb, var(--m
   var $ = function (id) { return document.getElementById(id); };
   var agents = {};
   var ws = null, audioCtx = null, micStream = null, processor = null, muted = false, joined = false;
-  var queue = [], current = null, playing = false;
+  var queue = [], current = null, playing = false, streaming = false;
 
   var STATE_LABEL = { listening: "Listening", thinking: "Thinking…", speaking: "Speaking", dormant: "Sleeping" };
 
@@ -171,6 +171,11 @@ input { flex:1; border-radius:999px; border:1px solid color-mix(in srgb, var(--m
     chunks.forEach(function (c) { for (var i = 0; i < c.length; i++, o += 2) { var s = Math.max(-1, Math.min(1, c[i])); v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true); } });
     return buffer;
   }
+  function toInt16(frame) {
+    var out = new Int16Array(frame.length);
+    for (var i = 0; i < frame.length; i++) { var s = Math.max(-1, Math.min(1, frame[i])); out[i] = s < 0 ? s * 0x8000 : s * 0x7fff; }
+    return out;
+  }
   function onFrame(samples) {
     if (muted || !ws || ws.readyState !== 1) return;
     var frame = downsample(samples, audioCtx.sampleRate);
@@ -180,6 +185,19 @@ input { flex:1; border-radius:999px; border:1px solid color-mix(in srgb, var(--m
     // Our own speakers leak into the mic; demand more energy while an agent is talking.
     var threshold = Math.max(0.012, noiseFloor * 3) * (isPlaying() ? 2.5 : 1);
     $("dot").style.transform = "scale(" + (1 + Math.min(1.5, rms * 20)) + ")";
+
+    // Streaming mode: the server (Deepgram Flux) detects turns. While an agent talks we
+    // send silence unless the founder is clearly speaking, so the agent's own voice
+    // coming out of the speakers doesn't interrupt it.
+    if (streaming) {
+      var loud = rms > threshold;
+      if (!loud && !isPlaying()) noiseFloor = noiseFloor * 0.95 + rms * 0.05;
+      loudFrames = loud ? loudFrames + 1 : 0;
+      if (isPlaying() && loudFrames >= 2) { stopPlayback(); send({ type: "interrupt" }); }
+      var pcm = isPlaying() && !loud ? new Int16Array(frame.length) : toInt16(frame);
+      ws.send(pcm.buffer);
+      return;
+    }
 
     if (!inSpeech) {
       noiseFloor = noiseFloor * 0.95 + rms * 0.05;
@@ -215,7 +233,8 @@ input { flex:1; border-radius:999px; border:1px solid color-mix(in srgb, var(--m
     };
     ws.onmessage = function (e) {
       var m; try { m = JSON.parse(e.data); } catch (err) { return; }
-      if (m.type === "hello") renderAgents(m.agents);
+      if (m.type === "hello") { renderAgents(m.agents); streaming = m.streaming === true; }
+      else if (m.type === "stream_unavailable") { streaming = false; toast("Using on-device voice detection"); }
       else if (m.type === "state") setState(m.agent, m.state);
       else if (m.type === "heard") log("You", m.text);
       else if (m.type === "speak") enqueueAudio(m.agent, m.audio);

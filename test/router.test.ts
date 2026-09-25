@@ -27,19 +27,21 @@ describe("commands", () => {
     if (c.kind !== "discuss") throw new Error("expected discuss");
     expect(c.mode).toBe("council");
     expect(c.topic).toBe("Should I build a forex journal?");
-    expect(c.steps.map((s) => [s.turn, s.parallel])).toEqual([
-      ["blind", true],
-      ["followUp", false],
-      ["summary", false],
+    expect(c.steps.map((s) => [s.turn, s.parallel, !!s.crux])).toEqual([
+      ["blind", true, false],
+      ["normal", false, true],
+      ["followUp", false, false],
+      ["summary", false, false],
     ]);
     expect(c.steps[0]!.agents).toEqual(CORE_AGENTS);
-    expect(c.steps[2]!.agents).toEqual(["nexus"]);
+    expect(c.steps[3]!.agents).toEqual(["nexus"]);
   });
 
   it("/debate has the configured number of rounds plus summary", () => {
     const c = route(msg("/debate subscriptions vs one-time"), ctx);
     if (c.kind !== "discuss") throw new Error("expected discuss");
-    expect(c.steps.filter((s) => s.turn !== "summary")).toHaveLength(3);
+    expect(c.steps.filter((s) => s.turn !== "summary" && !s.crux)).toHaveLength(3);
+    expect(c.steps.filter((s) => s.crux)).toHaveLength(1);
   });
 
   it("/atlas addresses Atlas directly", () => {

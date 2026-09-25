@@ -68,6 +68,10 @@ export interface PromptInput {
   /** The reply will be spoken (voice note or live call). */
   speaking?: boolean;
   trackRecord?: TrackRecord;
+  /** Replaces the registry personality (approved self-improvement). */
+  personality?: string;
+  /** Lessons the agent distilled from the founder's feedback. */
+  lessons?: string[];
   /** Retrieved older memory, the agent's own powers context, image descriptions… */
   extraContext?: string;
 }
@@ -86,11 +90,14 @@ export function buildSystemPrompt(input: PromptInput): string {
 
   const parts = [
     `You are ${a.name}, the council's ${a.role.toLowerCase()}.`,
-    a.personality,
+    input.personality ?? a.personality,
     COUNCIL_RULES,
     `Other members: ${others}.`,
   ];
   if (input.speaking) parts.push(SPEAKING_RULES);
+  if (input.lessons?.length) {
+    parts.push(`Lessons you learned from the founder's feedback (follow them):\n${input.lessons.map((l) => `- ${l}`).join("\n")}`);
+  }
   if (input.skillSummaries.length) {
     parts.push(`Your skills:\n${input.skillSummaries.map((s) => `- ${s}`).join("\n")}`);
   }

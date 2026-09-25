@@ -5,3 +5,6 @@ FROM docker.io/cloudflare/sandbox:0.12.10
 # Tools the engineers commonly need in addition to the base image's Node, Python and git.
 RUN apt-get update && apt-get install -y --no-install-recommends ripgrep jq \
   && rm -rf /var/lib/apt/lists/*
+
+# Shopify CLI for the design loop (theme push to a development theme).
+RUN npm install -g @shopify/cli@latest && mkdir -p /workspace/theme/sections

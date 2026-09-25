@@ -86,6 +86,7 @@ export const githubRead: Skill = {
     required: ["repo", "action"],
   },
   risk: "read",
+  untrusted: true,
   available,
   async run(args, ctx) {
     const repo = repoArg(args, ctx);
@@ -179,6 +180,7 @@ export const githubWrite: Skill = {
     required: ["repo", "branch", "message", "files"],
   },
   risk: "write",
+  scope: "external",
   available,
   async run(args, ctx) {
     const repo = repoArg(args, ctx);
@@ -232,6 +234,7 @@ export const githubOpenPr: Skill = {
     required: ["repo", "branch", "title"],
   },
   risk: "write",
+  scope: "external",
   requiresApproval: true,
   available,
   describeCall: (args) => `open a draft PR on ${str(args.repo)} from ${councilBranch(str(args.branch))}: “${str(args.title)}”`,
@@ -273,6 +276,7 @@ export const githubCiStatus: Skill = {
     required: ["repo"],
   },
   risk: "read",
+  untrusted: true,
   available,
   async run(args, ctx) {
     const repo = repoArg(args, ctx);
@@ -316,6 +320,7 @@ export const githubComment: Skill = {
     required: ["repo", "number", "body"],
   },
   risk: "write",
+  scope: "external",
   available,
   async run(args, ctx) {
     const repo = repoArg(args, ctx);

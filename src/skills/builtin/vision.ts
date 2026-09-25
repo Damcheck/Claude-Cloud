@@ -16,6 +16,7 @@ export const visionInspect: Skill = {
     required: ["question"],
   },
   risk: "read",
+  untrusted: true,
   async run(args, ctx) {
     if (!ctx.image) return "No image is attached to this conversation.";
     const task = (["query", "caption", "detect", "point"].includes(str(args.task)) ? str(args.task) : "query") as

@@ -28,6 +28,15 @@
   // Isolated Linux sandbox for Cipher and Forge (needs Docker running when you deploy).
   "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 3 }],
 
+  // Durable jobs: missions, research, design loop, evals, reflection, model scouting.
+  "workflows": [{ "name": "ai-council-jobs", "binding": "JOBS", "class_name": "CouncilJob" }],
+
+  // Runs tools the council writes for itself, each in its own locked-down isolate.
+  "worker_loaders": [{ "binding": "LOADER" }],
+
+  // Weekly database backups. Create with: wrangler r2 bucket create ai-council-backups
+  "r2_buckets": [{ "binding": "BACKUPS", "bucket_name": "ai-council-backups" }],
+
   "durable_objects": {
     "bindings": [
       { "name": "COUNCIL_ROOM", "class_name": "CouncilRoom" },
@@ -39,8 +48,8 @@
     { "tag": "v2", "new_sqlite_classes": ["Sandbox"] }
   ],
 
-  // Daily brief (UTC) and housekeeping. 06:45 UTC; change to suit your timezone.
-  "triggers": { "crons": ["45 6 * * *"] },
+  // One tick every 15 minutes drives watchers and all routines (see src/ops/schedule.ts for UTC times).
+  "triggers": { "crons": ["*/15 * * * *"] },
 
   "vars": {
     // Comma-separated Telegram group ids allowed to use the council. Empty = any group.
@@ -60,7 +69,15 @@
     // Optional Mini App link from @BotFather /newapp on the host bot, e.g. https://t.me/NexusCouncilBot/call
     "MINIAPP_URL": "",
     // Repos the GitHub and sandbox skills may touch, e.g. "damcheck/claude-cloud"
-    "GITHUB_REPOS": ""
+    "GITHUB_REPOS": "",
+    // MCP connectors, e.g. [{"name":"sentry","url":"https://mcp.sentry.dev/mcp","agents":["forge","cipher"]}]
+    // Token secret: MCP_TOKEN_<NAME>. Read-only tools run freely; others ask for approval.
+    "MCP_SERVERS": "",
+    // Design loop: your store and a development theme id to preview sections on.
+    "SHOPIFY_STORE": "",
+    "SHOPIFY_THEME_ID": "",
+    // Your phone number(s) (E.164) allowed to call the council through Twilio.
+    "OWNER_PHONE_NUMBERS": ""
   }
 
   // Secrets (wrangler secret put <NAME>):
@@ -69,4 +86,8 @@
   //   BOT_TOKEN_AXIOM, BOT_TOKEN_CIPHER, BOT_TOKEN_FORGE, BOT_TOKEN_IRIS
   //   FIRECRAWL_API_KEY or BRAVE_API_KEY   (web.search)
   //   GITHUB_TOKEN                          (fine-grained: contents, pull requests, actions read on GITHUB_REPOS)
+  //   GITHUB_WEBHOOK_SECRET                 (instant CI-failure alerts: webhook → /github/webhook, event workflow_run)
+  //   MCP_TOKEN_<NAME>                      (one per MCP server that needs a bearer token)
+  //   SHOPIFY_CLI_THEME_TOKEN               (Theme Access app password, for the design loop)
+  //   TWILIO_AUTH_TOKEN                     (phone calls: point your Twilio number's voice webhook at /twilio/voice)
 }

@@ -16,10 +16,50 @@ export interface Step {
   instruction?: string;
   /** Live calls: ask these agents for speak bids first; the winners replace this step. */
   bid?: boolean;
+  /** Map the arguments so far and find the crux; Sage researches it if it's factual. */
+  crux?: boolean;
 }
 
 /** Commands the room answers from its database, without asking a model. */
-export const SYSTEM_COMMANDS = ["actions", "claims", "ideas", "record", "cost", "call", "voice", "followups"] as const;
+export const SYSTEM_COMMANDS = [
+  "actions",
+  "claims",
+  "ideas",
+  "record",
+  "cost",
+  "call",
+  "voice",
+  "followups",
+  // v3
+  "selftest",
+  "eval",
+  "autonomy",
+  "freeze",
+  "unfreeze",
+  "dryrun",
+  "audit",
+  "why",
+  "admin",
+  "mission",
+  "missions",
+  "mission_stop",
+  "mission_reply",
+  "watch",
+  "watchers",
+  "unwatch",
+  "decisions",
+  "forecast",
+  "resolve",
+  "graph",
+  "tools",
+  "research",
+  "build",
+  "lessons",
+  "models",
+  "backup",
+  "reflect",
+  "scout",
+] as const;
 export type SystemCommand = (typeof SYSTEM_COMMANDS)[number];
 
 export type Command =
@@ -155,6 +195,7 @@ export function planForMode(mode: Mode, specialists: AgentId[], chosen: AgentId[
       return [
         ...irisFirst,
         { agents: uniq([...core, ...nonIris]), parallel: true, turn: "blind" },
+        { agents: ["nexus"], parallel: false, turn: "normal", crux: true },
         { agents: uniq([...core, ...nonIris]), parallel: false, turn: "followUp" },
         { agents: ["nexus"], parallel: false, turn: "summary" },
       ];
@@ -162,6 +203,7 @@ export function planForMode(mode: Mode, specialists: AgentId[], chosen: AgentId[
       const steps: Step[] = [
         ...irisFirst,
         { agents: uniq([...core, ...nonIris]), parallel: true, turn: "blind" },
+        { agents: ["nexus"], parallel: false, turn: "normal", crux: true },
       ];
       for (let r = 2; r <= LIMITS.debateRounds; r++) {
         steps.push({ agents: uniq([...core, ...nonIris]), parallel: false, turn: "followUp" });
