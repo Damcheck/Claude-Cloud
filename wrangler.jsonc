@@ -1,0 +1,37 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-council",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": { "enabled": true },
+
+  "ai": { "binding": "AI" },
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-council",
+      // Replace with the id printed by `wrangler d1 create ai-council`
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "COUNCIL_ROOM", "class_name": "CouncilRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CouncilRoom"] }],
+
+  "vars": {
+    // Comma-separated Telegram chat ids allowed to use the council. Empty = any chat.
+    "ALLOWED_CHAT_IDS": "",
+    // Which agent's bot receives the webhook and posts system notices.
+    "HOST_AGENT": "nexus"
+  }
+
+  // Secrets (wrangler secret put <NAME>):
+  //   TELEGRAM_WEBHOOK_SECRET
+  //   BOT_TOKEN_ATLAS, BOT_TOKEN_NOVA, BOT_TOKEN_SAGE, BOT_TOKEN_NEXUS,
+  //   BOT_TOKEN_AXIOM, BOT_TOKEN_CIPHER, BOT_TOKEN_FORGE, BOT_TOKEN_IRIS
+}
