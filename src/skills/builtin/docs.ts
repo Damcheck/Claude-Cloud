@@ -24,6 +24,7 @@ export const docRead: Skill = {
     required: ["id"],
   },
   risk: "read",
+  untrusted: true,
   async run(args, ctx) {
     const doc = await ctx.store.getDocument(num(args.id, -1));
     if (!doc || !ctx.sharedConvIds.includes(doc.conv_id)) return "No such document in this conversation.";
@@ -44,6 +45,7 @@ export const docParse: Skill = {
     required: ["url"],
   },
   risk: "read",
+  untrusted: true,
   async run(args, ctx) {
     const url = parseHttpUrl(args.url);
     if (!url) return "Invalid URL.";

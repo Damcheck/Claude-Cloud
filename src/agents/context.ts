@@ -32,6 +32,14 @@ export async function agentContext(
     parts.push(`Your open predictions:\n${predictions.map((p) => `- #${p.id} "${p.claim}" (check ${day(p.check_at)})`).join("\n")}`);
   }
 
+  // Knowledge graph: what the council knows about things mentioned just now.
+  const entities = lastHuman ? await store.ops.findEntities(sharedConvIds, lastHuman, 3).catch(() => []) : [];
+  for (const e of entities) {
+    const d = await store.ops.entityDetails(e.id);
+    const facts = d.facts.slice(0, 6).map((f) => `${f.attribute}: ${f.value}`).join("; ");
+    parts.push(`Known about ${e.name} (${e.type}): ${[e.summary, facts].filter(Boolean).join(" | ")}`);
+  }
+
   switch (agent) {
     case "nova": {
       const ideas = await store.searchIdeas(lastHuman, 5);
@@ -52,6 +60,10 @@ export async function agentContext(
         parts.push(`Open action items:\n${actions.map((a) => `- #${a.id} ${a.text} (owner: ${a.owner}${a.due_at ? `, due ${day(a.due_at)}` : ""})`).join("\n")}`);
       }
       if (followups.length) parts.push(`Scheduled follow-ups:\n${followups.map((f) => `- ${day(f.due_at)} ${f.agent}: ${f.note}`).join("\n")}`);
+      const [digest, decisions] = await Promise.all([store.ops.undeliveredDigest(sharedConvIds), store.ops.decisions(sharedConvIds, 10)]);
+      if (digest.length) parts.push(`Things members noticed (digest):\n${digest.map((d) => `- ${d.agent}: ${d.summary}`).join("\n")}`);
+      const due = decisions.filter((d) => d.status === "active" && d.review_at && d.review_at < Date.now() + 7 * 86400_000);
+      if (due.length) parts.push(`Decisions due for review:\n${due.map((d) => `- #${d.id} ${d.title} (chose ${d.chosen})`).join("\n")}`);
       break;
     }
     case "cipher":

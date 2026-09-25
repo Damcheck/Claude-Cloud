@@ -190,6 +190,10 @@ export function followupInstruction(kind: string, note: string): string {
       return `Time to review a prediction you made. ${note} Decide whether it came true (search if needed), call prediction.resolve, and tell the founder briefly what happened and what you learnt.`;
     case "action_check":
       return `An action item is due. ${note} Ask the founder whether it happened; if they already said so in the conversation, call actions.complete.`;
+    case "decision_review":
+      return `A decision is due for review. ${note} Ask the founder how it turned out (or check yourself if you can), then record the outcome with decision.review.`;
+    case "tool_review":
+      return `${note} Read it with tools.review (action "read"). Check it does what it claims, can't leak data or run away, and only touches the domains it declares. Then call tools.review with action "approve" or "reject" plus notes, and summarise your verdict here in two or three lines.`;
     case "pr_review":
       return `${note} Read the PR and its diff with github.read (action pr, then pr_diff), review it for correctness and architecture, post your review with github.comment, then summarise it here in a few lines.`;
     default:

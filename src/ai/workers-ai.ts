@@ -54,9 +54,32 @@ function aiOptions(opts?: CallOptions): AiOptions | undefined {
   return { gateway: { id: opts.gatewayId, metadata: opts.metadata, collectLog: true } };
 }
 
+/** Overload / rate-limit errors are worth retrying; anything else goes straight to the backup model. */
+export function isRetryable(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b(429|503|504)\b|rate.?limit|too many requests|capacity|overloaded|temporarily unavailable|timed? ?out|3040|3043/i.test(msg);
+}
+
+export const RETRY_DELAYS_MS = [600, 1800];
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 /** Model ids are newer than the generated binding types, so call through an untyped signature. */
-function run(ai: Ai, model: string, input: unknown, opts?: CallOptions): Promise<unknown> {
-  return (ai.run as unknown as RunFn).call(ai, model, input, aiOptions(opts));
+async function run(ai: Ai, model: string, input: unknown, opts?: CallOptions): Promise<unknown> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await (ai.run as unknown as RunFn).call(ai, model, input, aiOptions(opts));
+    } catch (err) {
+      const delay = RETRY_DELAYS_MS[attempt];
+      if (delay === undefined || !isRetryable(err)) throw err;
+      await sleep(delay);
+    }
+  }
+}
+
+/** Raw access for callers that need non-standard options (e.g. websocket streaming). */
+export function runRaw(ai: Ai, model: string, input: unknown, options?: AiOptions): Promise<unknown> {
+  return (ai.run as unknown as RunFn).call(ai, model, input, options);
 }
 
 interface RawToolCall {
@@ -176,8 +199,8 @@ export async function transcribe(ai: Ai, model: string, audio: Uint8Array, opts?
 
 export interface SpeechOptions {
   speaker: string;
-  /** "ogg-opus" for Telegram voice bubbles, "mp3" for browsers. */
-  format: "ogg-opus" | "mp3";
+  /** "ogg-opus" for Telegram voice bubbles, "mp3" for browsers, "mulaw-8k" for phone calls. */
+  format: "ogg-opus" | "mp3" | "mulaw-8k";
 }
 
 /** Text → audio bytes. Handles every output shape the TTS binding may return. */
@@ -185,7 +208,9 @@ export async function speak(ai: Ai, model: string, text: string, speech: SpeechO
   const input =
     speech.format === "ogg-opus"
       ? { text, speaker: speech.speaker, encoding: "opus", container: "ogg" }
-      : { text, speaker: speech.speaker, encoding: "mp3" };
+      : speech.format === "mulaw-8k"
+        ? { text, speaker: speech.speaker, encoding: "mulaw", sample_rate: 8000, container: "none" }
+        : { text, speaker: speech.speaker, encoding: "mp3" };
   return audioBytes(await run(ai, model, input, opts));
 }
 

@@ -68,6 +68,20 @@ async function visit(ctx: SkillContext, url: URL, opts: { mobile: boolean; click
   }
 }
 
+/** Render an HTML document (e.g. a design preview) and screenshot it. */
+export async function screenshotHtml(env: Env, html: string, mobile = false): Promise<Uint8Array> {
+  const puppeteer = (await import("@cloudflare/puppeteer")).default;
+  const browser = await puppeteer.launch(env.BROWSER as any);
+  try {
+    const page = await browser.newPage();
+    await page.setViewport(mobile ? { width: 390, height: 844, isMobile: true, deviceScaleFactor: 2 } : { width: 1366, height: 900 });
+    await page.setContent(html, { waitUntil: "networkidle0", timeout: 20_000 });
+    return new Uint8Array((await page.screenshot({ type: "png", fullPage: true })) as Uint8Array);
+  } finally {
+    await browser.close();
+  }
+}
+
 function describeScreenshot(ctx: SkillContext, png: Uint8Array, question: string): Promise<string> {
   return runVision(
     ctx.env.AI,
@@ -105,6 +119,7 @@ export const browserInspect: Skill = {
     required: ["url"],
   },
   risk: "read",
+  untrusted: true,
   available,
   async run(args, ctx) {
     const url = parseHttpUrl(args.url);
@@ -133,6 +148,7 @@ export const browserTest: Skill = {
     required: ["url"],
   },
   risk: "read",
+  untrusted: true,
   available,
   async run(args, ctx) {
     const url = parseHttpUrl(args.url);
@@ -153,6 +169,7 @@ export const browserScreenshot: Skill = {
     required: ["url"],
   },
   risk: "read",
+  untrusted: true,
   available,
   async run(args, ctx) {
     const url = parseHttpUrl(args.url);

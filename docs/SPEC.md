@@ -1,13 +1,14 @@
-# AI Council — Technical Specification (v2)
+# AI Council — Technical Specification (v3)
 
 Eight independent AI agents, each running on its own Cloudflare Workers AI model,
 discuss with the founder and with each other in a Telegram group, in private DMs,
 through voice notes and in a live voice room. One orchestrator decides who speaks,
 stops loops and controls cost.
 
-> Status: **v2**. Everything below is implemented. Model IDs were checked against the
+> Status: **v3**. Everything below is implemented. Model IDs were checked against the
 > Workers AI catalog/changelog on 2026-09-25. None of it has been run against live
-> Telegram / Workers AI yet; see §12 for what to verify first.
+> Telegram / Workers AI yet: run `/selftest` first (§12). The v3 features (autonomy,
+> missions, watchers, learning, …) are described in §13–§22.
 
 ---
 
@@ -270,7 +271,7 @@ SFU) are a possible later step.
 - **Reliability:** backup model per agent; Telegram HTML falls back to plain text;
   duplicate webhook deliveries ignored; failed turns post a ⚠️ notice instead of
   stalling the discussion.
-- **Cron (06:45 UTC):** daily briefs for chats with `/brief on`; cleanup of the de-dupe table.
+- **Cron:** one tick every 15 minutes drives watchers, briefs and routines (§22).
 - **CI:** `.github/workflows/ci.yml` runs typecheck, tests and a bundle dry run.
 
 ---
@@ -278,30 +279,182 @@ SFU) are a possible later step.
 ## 11. Code map
 
 ```
-src/index.ts              Worker: webhooks, auth, /app, /voice/ws, cron
-src/council/room.ts       CouncilRoom Durable Object (plans, alarms, posting, voice, approvals)
+src/index.ts              Worker: Telegram webhooks, reactions, /app, /voice/ws, /admin,
+                          /twilio/*, /github/webhook, the 15-minute cron
+src/council/room.ts       CouncilRoom Durable Object: plans, alarms, posting, voice, phone,
+                          approvals, alerts queue, crux + groupthink steps, graph conflicts
+src/council/commands.ts   every /command that doesn't start a discussion
 src/council/router.ts     commands, mentions, specialist wake-up, plans
-src/council/bids.ts       live-call speak bids
-src/agents/registry.ts    the 8 agents
-src/agents/prompts.ts     system/user prompts, special instructions
-src/agents/context.ts     per-agent power context + semantic recall
-src/agents/runner.ts      one agent turn: backup model, budget, tool loop, approvals, images
-src/skills/               skill interface, registry, builtin/*
-src/memory/store.ts       D1 + Vectorize
-src/telegram/             Bot API client, Markdown → Telegram HTML
-src/voice/                Mini App page, auth, speech helpers
-migrations/               D1 schema
+src/council/*.ts          bids, crux, diversity, forecast, post helpers
+src/agents/               registry, prompts, per-agent context, runner, runtime overrides
+src/autonomy/policy.ts    who may act: levels, freeze, dry-run, taint
+src/skills/               skill interface, registry (built-in + MCP + council-built), builtin/*
+src/jobs/                 CouncilJob Workflow: missions, research, design loop, evals,
+                          reflection, model scouting
+src/watchers/             watchers, relevance gate, GitHub webhook
+src/mcp/                  MCP client + skill adapter
+src/tools/                council-built tools (Worker Loader) + egress gateway
+src/knowledge/            knowledge graph, memory consolidation
+src/evals/                behavioural test scenarios and scoring
+src/ops/                  selftest, admin dashboard, backups, schedule
+src/voice/                Mini App page, auth, speech, Flux streaming, phone (Twilio)
+src/memory/               D1 (store.ts, ops.ts) + Vectorize
+migrations/               D1 schema 0001–0003
 ```
 
 ---
 
 ## 12. First live checks
 
-These depend on the live services' response shapes, which the code handles defensively
-but tests can't prove:
+Run **`/selftest`** in the group. It calls every model (plain reply and tool calling),
+Moondream, an Aura → Whisper round trip, Opus voice notes, embeddings and D1, and lists
+which bindings, keys and bot tokens are configured. Then check by hand:
 
-1. A plain message and `/council` in the group (tool calling on each model).
+1. A plain message and `/council` in the group.
 2. An image (Moondream response shape; Gemma fallback).
-3. A voice note (Whisper input, Aura-2 Opus output → Telegram voice bubble).
-4. `/call` in a browser (mic, WAV upload, MP3 playback, barge-in).
+3. A voice note (Whisper in, Aura-2 Opus out → Telegram voice bubble).
+4. `/call` in a browser (Flux streaming or VAD fallback, playback, barge-in).
 5. With keys set: `web.search`, a GitHub read, a sandbox `npm test`, `browser.inspect`.
+6. `/mission` with a small goal and `--budget 50k`; `/research` on a narrow topic.
+
+---
+
+## 13. Autonomy and safety (v3)
+
+Every skill call goes through one policy (`src/autonomy/policy.ts`):
+
+| Check | Effect |
+|---|---|
+| `/freeze` | nothing acts or speaks; missions, watchers and routines pause |
+| read-only skill | always runs |
+| `/dryrun on` (per chat) | writes are simulated and described instead |
+| level **suggest** | the agent describes what it would do |
+| skill always needs approval (PRs, deploy/push commands, missions, tool activation, persona/model swaps) | ✅/❌ buttons |
+| level **approve** | ✅/❌ buttons |
+| **taint**: the agent read outside content this turn and the skill acts on the world | ✅/❌ buttons |
+| otherwise | runs |
+
+Levels are set per agent, per skill or per group (`github.*`) with `/autonomy`; the most
+specific rule wins; the default is **act**. Outside content (web, documents, repos, MCP,
+custom tools, OCR) is wrapped in `<untrusted_content>` and marked as data. Every call is
+audited (`skill_calls`, `/audit`), every turn traced (`traces`, admin page, `/why`).
+Overloaded models (429/capacity) are retried before switching to the backup model.
+
+## 14. Missions
+
+`/mission <goal> [--budget 300k] [--days 3]` (or an agent's `mission.propose`, which
+needs ✅) starts a `CouncilJob` Workflow instance:
+
+1. **Plan**: Nexus writes success criteria and 3–10 tasks with assignees and dependencies
+   (validated: known agents, no cycles).
+2. **Cycles**: up to 3 ready tasks run in parallel as agent turns with full skills and the
+   mission's token tag. Results are posted and passed to dependent tasks. A task can answer
+   `BLOCKED:`; the mission then asks the founder and waits (up to 24 h) for
+   `/mission_reply`. Approvals requested inside a mission come back as new tasks.
+3. **Evaluate**: when all tasks are done, Nexus checks the success criteria and adds up to
+   3 tasks for gaps (twice at most).
+4. **Finish**: final report, lessons saved to memory.
+
+It stops on `/mission_stop`, the deadline, or the token budget, and pauses while frozen.
+Every step is checkpointed, so missions survive restarts.
+
+## 15. Watchers
+
+`/watch <url | feed | owner/repo> [agent] [6h]` or an agent's `watch.add`. The cron checks
+due watchers every 15 minutes:
+
+- **url**: page text hash; on change, the added/removed lines.
+- **rss/atom**: new items.
+- **github**: latest completed Actions run; a new failure is urgent. With
+  `GITHUB_WEBHOOK_SECRET`, `workflow_run` webhooks alert instantly.
+
+The watching agent rates each change (importance, urgency) with its fast model: urgent or
+≥0.8 → it speaks now (queued after any running discussion); ≥0.4 → the digest in the next
+daily brief; otherwise ignored. A CI failure starts Forge investigating and Cipher fixing
+(PR behind ✅).
+
+## 16. Connectors and tools the council builds
+
+**MCP** (`MCP_SERVERS`): every tool on each server becomes `mcp.<server>.<tool>` for the
+listed agents. Read-only tools (`readOnlyHint`) run freely; others need ✅ (configurable).
+Output is untrusted.
+
+**Council-built tools**: Cipher writes one with `tools.create` (an ES module that
+default-exports an async function, ≤20 KB, with declared domains). Forge reviews it
+(`tools.review`), the founder approves it, and it becomes `custom.<name>` for the listed
+agents. Each tool runs in its own isolate via the **Worker Loader**: no bindings, no
+secrets, 2 s CPU, 20 subrequests, and network only through `ToolEgress`, which allows https
+to the declared domains.
+
+**Images**: `image.generate` (FLUX-1 schnell) for Nova, Axiom and Cipher.
+
+## 17. Better deliberation
+
+- **Crux**: after the blind round of `/council` and `/debate`, the discussion is mapped
+  into positions and disagreements and the crux is posted; if it's empirical, Sage
+  researches it (and logs claims) before the next round.
+- **Groupthink guard**: blind-round answers are embedded; mean pairwise cosine ≥0.9 makes
+  the most typical member re-answer as a declared devil's advocate.
+- **Decision records**: `decision.record` (options, choice, dissent, rationale, review
+  date) with a review follow-up; `/decisions`.
+- **Forecasts**: `/forecast <question>`: each core member's probability, weighted by its
+  Brier score (per domain with ≥3 resolved, else overall), extremized log-odds average;
+  `/resolve <#> yes|no`; calibration in `/record`.
+
+## 18. Knowledge graph and memory upkeep
+
+After each summarized discussion, entities (projects, people, companies, products, tools,
+markets, decisions), current facts and relations are extracted. A new fact that contradicts
+a current one is not written: the founder gets "use the new one / keep the old one"
+buttons. Agents see facts about entities mentioned in the latest message and can
+`graph.query`. Nightly, an agent with more than 40 private notes has them merged into at
+most 20 (old notes archived, not deleted).
+
+## 19. Learning and self-improvement
+
+- Founder reactions on an agent's message (👍 🔥 ❤️ … / 👎 💩 …) are stored as feedback
+  (the host bot must be a group admin to receive reactions).
+- **Weekly reflection** (Friday, or `/reflect`): each agent reviews its feedback and
+  prediction record, writes up to 4 lessons (injected into its prompt; newest 10 kept) and
+  may propose a new personality. The proposal runs through the eval suite; only if it
+  scores at least as well does the founder get ✅/❌.
+- **Evals** (`/eval [agent] [@cf/model]`): scenarios for challenging false claims,
+  independence in blind rounds, brevity, passing when there's nothing to add, concrete
+  plans, and resisting pressure. Deterministic checks plus an LLM judge; results stored.
+- **Model scouting** (Wednesday, or `/scout`): new text models in the Workers AI catalog are
+  tested as each agent on the quick suite; a ≥10-point win proposes a swap (✅). Swaps and
+  personalities are runtime overrides (`/models`).
+
+## 20. Research and design loops
+
+- **`/research <topic>`**: plan 5–7 queries → search → read up to 24 sources and extract
+  quoted evidence → Sage lists contradictions and gaps → Atlas writes a cited report → a
+  summary is posted, and the full Markdown report is attached and saved as a document.
+- **`/build <section> [--repo owner/name]`** (after sending a mockup, or FLUX makes one):
+  Gemma turns the mockup into a build spec; Cipher writes a standalone HTML preview and the
+  Liquid section; the preview is rendered with Browser Rendering and compared with the
+  mockup (score + differences); up to 4 iterations until ≥85%. The Liquid file is posted,
+  pushed to a development theme with Shopify CLI in the sandbox (if configured; the token
+  goes in as an environment variable, never in the command), committed to a `council/`
+  branch, and a PR is requested (✅).
+
+## 21. Voice v3
+
+- **Flux streaming**: the voice room streams 16 kHz PCM; Deepgram Flux reports
+  StartOfTurn (barge-in) and EndOfTurn (transcript). While an agent speaks, the client
+  sends silence unless the founder is clearly talking (echo guard). If Flux isn't
+  available it falls back to on-device VAD + Whisper.
+- **Phone**: a Twilio number's voice webhook → `/twilio/voice` (signature checked; the
+  caller must be in `OWNER_PHONE_NUMBERS`) → TwiML `<Connect><Stream>` with a signed token
+  → the home group's room. μ-law 8 kHz in (Flux, or server VAD + Whisper), Aura-2 μ-law out,
+  `mark` events count as playback finished, `clear` on barge-in. The call is transcribed
+  into the Telegram chat.
+
+## 22. Operations v3
+
+- **Schedule** (UTC, one cron every 15 min): watchers every tick; memory consolidation
+  02:00; backups Sun 03:00; cleanup 04:00; daily brief 06:45; weekly plan Mon 07:00; model
+  scouting Wed 09:00; retro Fri 16:00; reflection Fri 16:15. Brief, plan and retro run in
+  chats with `/brief on`; the rest post to the home group.
+- **`/selftest`**, **`/admin`** (turns, audit, usage, missions, jobs, approvals, watchers,
+  autonomy, tools, errors), **`/why [agent]`**, **`/audit`**, **`/backup`** (R2 JSON export).

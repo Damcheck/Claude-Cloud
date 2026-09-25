@@ -8,7 +8,7 @@ export type SkillRisk = "read" | "write" | "exec";
 export interface RoomHooks {
   /** Re-plan the room's alarm after scheduling a follow-up. */
   scheduleNext(): Promise<void>;
-  sendPhoto(agent: AgentId, png: Uint8Array, caption?: string): Promise<void>;
+  sendPhoto(agent: AgentId, png: Uint8Array, caption?: string): Promise<string | undefined>;
   /** Post the ✅ / ❌ buttons for approval request `id`. */
   requestApproval(id: number, agent: AgentId, summary: string): Promise<void>;
 }
@@ -31,6 +31,14 @@ export interface SkillContext {
   consultDepth: number;
   callOptions: CallOptions;
   hooks?: RoomHooks;
+  /** The discussion this turn belongs to (traces). */
+  discussionId?: number | null;
+  /** Groups token usage for budgets, e.g. "mission:12". */
+  usageTag?: string;
+  /** Mission this turn works for (approvals report back to it). */
+  missionId?: number;
+  /** Loopback bindings (ctx.exports) for sandboxed custom tools. */
+  loopback?: unknown;
 }
 
 /**
@@ -45,6 +53,10 @@ export interface Skill {
   /** JSON schema for the arguments. */
   parameters: Record<string, unknown>;
   risk: SkillRisk;
+  /** internal = the council's own records; external = acts on the world. Defaults from risk. */
+  scope?: "internal" | "external";
+  /** Output comes from outside the council (web, documents, repos, tools): wrapped and taints the turn. */
+  untrusted?: boolean;
   /** Calls that need the founder's ✅ first. A function lets only some calls need approval. */
   requiresApproval?: boolean | ((args: Record<string, unknown>) => boolean);
   /** One line shown on the approval request. */

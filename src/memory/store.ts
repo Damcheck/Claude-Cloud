@@ -1,6 +1,7 @@
 import { embed } from "../ai/workers-ai";
 import { SYSTEM_MODELS } from "../config";
 import type { AgentId, Mode, TranscriptMessage } from "../types";
+import { OpsStore } from "./ops";
 
 /**
  * All D1 / Vectorize access goes through here.
@@ -19,13 +20,14 @@ export interface Approval {
   status: "pending" | "approved" | "rejected" | "failed";
   result: string | null;
   telegram_message_id: number | null;
+  mission_id: number | null;
 }
 
 export interface Followup {
   id: number;
   conv_id: number;
   agent: AgentId;
-  kind: "followup" | "prediction_review" | "action_check" | "pr_review";
+  kind: "followup" | "prediction_review" | "action_check" | "pr_review" | "decision_review" | "tool_review";
   note: string;
   ref_id: number | null;
   due_at: number;
@@ -51,11 +53,16 @@ export function utcDay(ts = Date.now()): string {
 }
 
 export class MemoryStore {
+  /** v3 tables: autonomy, audit, missions, watchers, learning, graph, tools, evals. */
+  readonly ops: OpsStore;
+
   constructor(
     private db: D1Database,
     private ai?: Ai,
     private vectors?: VectorizeIndex,
-  ) {}
+  ) {
+    this.ops = new OpsStore(db);
+  }
 
   get hasVectors(): boolean {
     return !!(this.ai && this.vectors);
@@ -135,6 +142,14 @@ export class MemoryStore {
     return row!.id;
   }
 
+  /** The stored message behind a Telegram message id (for reactions). */
+  async messageByTelegramId(convId: number, telegramId: number): Promise<{ id: number; speaker: string } | null> {
+    return this.db
+      .prepare("SELECT id, speaker FROM messages WHERE chat_id = ? AND telegram_message_id = ? ORDER BY id DESC LIMIT 1")
+      .bind(convId, telegramId)
+      .first<{ id: number; speaker: string }>();
+  }
+
   /** Most recent `limit` messages, oldest first. */
   async recentMessages(convId: number, limit: number): Promise<TranscriptMessage[]> {
     const { results } = await this.db
@@ -180,7 +195,7 @@ export class MemoryStore {
   /** An agent's private memory follows it everywhere (group and DMs): there is only one Atlas. */
   async agentMemories(agent: AgentId, limit = 20): Promise<string[]> {
     const { results } = await this.db
-      .prepare("SELECT memory FROM agent_memories WHERE agent = ? ORDER BY id DESC LIMIT ?")
+      .prepare("SELECT memory FROM agent_memories WHERE agent = ? AND archived = 0 ORDER BY id DESC LIMIT ?")
       .bind(agent, limit)
       .all<{ memory: string }>();
     return results.reverse().map((r) => r.memory);
@@ -296,13 +311,14 @@ export class MemoryStore {
   // Usage and budgets
   // -------------------------------------------------------------------------
 
-  async recordUsage(convId: number, agent: AgentId, model: string, prompt: number, completion: number): Promise<void> {
+  /** `tag` groups usage for budgets, e.g. "mission:12" or "job:4". */
+  async recordUsage(convId: number, agent: AgentId, model: string, prompt: number, completion: number, tag?: string): Promise<void> {
     if (!prompt && !completion) return;
     await this.db
       .prepare(
-        "INSERT INTO usage (conv_id, agent, model, prompt_tokens, completion_tokens, day, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO usage (conv_id, agent, model, prompt_tokens, completion_tokens, day, created_at, tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
       )
-      .bind(convId, agent, model, prompt, completion, utcDay(), Date.now())
+      .bind(convId, agent, model, prompt, completion, utcDay(), Date.now(), tag ?? null)
       .run();
   }
 
@@ -329,12 +345,12 @@ export class MemoryStore {
   // Approvals
   // -------------------------------------------------------------------------
 
-  async createApproval(a: { convId: number; chatId: number; agent: AgentId; skill: string; args: unknown; summary: string }): Promise<number> {
+  async createApproval(a: { convId: number; chatId: number; agent: AgentId; skill: string; args: unknown; summary: string; missionId?: number }): Promise<number> {
     const row = await this.db
       .prepare(
-        "INSERT INTO approvals (conv_id, chat_id, agent, skill, args_json, summary, created_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING id",
+        "INSERT INTO approvals (conv_id, chat_id, agent, skill, args_json, summary, created_at, mission_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id",
       )
-      .bind(a.convId, a.chatId, a.agent, a.skill, JSON.stringify(a.args ?? {}), a.summary, Date.now())
+      .bind(a.convId, a.chatId, a.agent, a.skill, JSON.stringify(a.args ?? {}), a.summary, Date.now(), a.missionId ?? null)
       .first<{ id: number }>();
     return row!.id;
   }

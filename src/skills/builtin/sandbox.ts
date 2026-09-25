@@ -41,6 +41,8 @@ export const sandboxExec: Skill = {
     required: ["command"],
   },
   risk: "exec",
+  scope: "external",
+  untrusted: true,
   requiresApproval: (args) => RISKY_COMMAND.test(str(args.command)),
   describeCall: (args) => `run in the sandbox: \`${str(args.command).slice(0, 200)}\``,
   available,
@@ -73,6 +75,17 @@ export const sandboxExec: Skill = {
   },
 };
 
+/**
+ * Run a command with secrets passed as environment variables (never in the command text,
+ * which is audited). For internal jobs only; not exposed to agents.
+ */
+export async function execWithSecrets(ctx: SkillContext, command: string, secrets: Record<string, string>, cwd = "/workspace"): Promise<{ ok: boolean; output: string }> {
+  const sandbox = await sandboxFor(ctx);
+  const r = await sandbox.exec(command, { cwd, timeout: LIMITS.sandboxTimeoutMs, env: secrets });
+  const redact = (t: string) => Object.values(secrets).reduce((acc, v) => (v ? acc.split(v).join("***") : acc), t);
+  return { ok: r.exitCode === 0, output: redact(`${r.stdout}\n${r.stderr}`).trim() };
+}
+
 export const sandboxWriteFile: Skill = {
   id: "sandbox.write_file",
   description: "Write a file inside the sandbox (under /workspace), e.g. to apply a fix before running tests.",
@@ -82,6 +95,7 @@ export const sandboxWriteFile: Skill = {
     required: ["path", "content"],
   },
   risk: "exec",
+  scope: "external",
   available,
   async run(args, ctx) {
     const path = str(args.path);
