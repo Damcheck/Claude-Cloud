@@ -1,0 +1,27 @@
+{
+  "name": "ai-council",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:migrate": "wrangler d1 migrations apply ai-council --remote",
+    "db:migrate:local": "wrangler d1 migrations apply ai-council --local",
+    "telegram:setup": "node scripts/set-webhook.mjs",
+    "vectorize:create": "wrangler vectorize create ai-council-memory --dimensions=1024 --metric=cosine",
+    "deploy:no-sandbox": "wrangler deploy --containers-rollout=none"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260925.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7",
+    "wrangler": "^4.140.0"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.4.0",
+    "@cloudflare/sandbox": "^0.12.10"
+  }
+}
