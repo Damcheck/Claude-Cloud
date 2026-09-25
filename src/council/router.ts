@@ -1,5 +1,5 @@
 import { AGENTS, CORE_AGENTS, isAgentId } from "../agents/registry";
-import type { TurnKind } from "../agents/prompts";
+import { SPECIAL_INSTRUCTIONS, type TurnKind } from "../agents/prompts";
 import { LIMITS } from "../config";
 import type { AgentId, IncomingMessage, Mode } from "../types";
 
@@ -12,12 +12,22 @@ export interface Step {
   agents: AgentId[];
   parallel: boolean;
   turn: TurnKind;
+  /** Replaces the mode/round instruction for this step. */
+  instruction?: string;
+  /** Live calls: ask these agents for speak bids first; the winners replace this step. */
+  bid?: boolean;
 }
+
+/** Commands the room answers from its database, without asking a model. */
+export const SYSTEM_COMMANDS = ["actions", "claims", "ideas", "record", "cost", "call", "voice", "followups"] as const;
+export type SystemCommand = (typeof SYSTEM_COMMANDS)[number];
 
 export type Command =
   | { kind: "stop" }
   | { kind: "status" }
   | { kind: "help" }
+  | { kind: "system"; name: SystemCommand; arg: string }
+  | { kind: "brief_toggle"; on: boolean }
   | { kind: "discuss"; mode: Mode; topic: string; agents: AgentId[]; steps: Step[] };
 
 export interface RouteContext {
@@ -169,6 +179,8 @@ export function planForMode(mode: Mode, specialists: AgentId[], chosen: AgentId[
       return [...irisFirst, { agents: uniq([...core, ...nonIris]), parallel: false, turn: "normal" }];
     case "chat":
       return [{ agents: withSpecialists(chosen, specialists), parallel: false, turn: "normal" }];
+    case "live":
+      return [{ agents: chosen, parallel: false, turn: "normal" }];
   }
 }
 
@@ -180,8 +192,52 @@ const MODE_COMMANDS: Record<string, Mode> = {
   discuss: "council",
 };
 
+/** Commands that hand one or two agents a specific task. */
+const SPECIAL_COMMANDS: Record<string, { steps: Step[]; needsTopic: boolean }> = {
+  premortem: {
+    needsTopic: true,
+    steps: [
+      { agents: ["atlas"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.premortem },
+      { agents: ["sage"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.premortemChallenge },
+    ],
+  },
+  decide: {
+    needsTopic: true,
+    steps: [{ agents: ["atlas"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.decision }],
+  },
+  personas: {
+    needsTopic: true,
+    steps: [{ agents: ["axiom"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.personas }],
+  },
+  minutes: {
+    needsTopic: false,
+    steps: [{ agents: ["nexus"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.minutes }],
+  },
+  brief: {
+    needsTopic: false,
+    steps: [{ agents: ["nexus"], parallel: false, turn: "normal", instruction: SPECIAL_INSTRUCTIONS.brief }],
+  },
+};
+
+function discuss(mode: Mode, topic: string, steps: Step[]): Command {
+  return { kind: "discuss", mode, topic, agents: agentsOf(steps), steps };
+}
+
+/** In a DM only that agent's bot can post, so every plan collapses to the DM agent. */
+function forDm(cmd: Command, dmAgent: AgentId): Command {
+  if (cmd.kind !== "discuss") return cmd;
+  const instruction = cmd.steps.find((s) => s.instruction)?.instruction;
+  const steps: Step[] = [{ agents: [dmAgent], parallel: false, turn: "normal", instruction }];
+  return discuss(cmd.mode === "chat" ? "direct" : cmd.mode, cmd.topic, steps);
+}
+
 /** Decide what to do with a human message. Pure: no I/O. */
 export function route(msg: IncomingMessage, ctx: RouteContext): Command {
+  const cmd = routeCommand(msg, ctx);
+  return msg.dmAgent ? forDm(cmd, msg.dmAgent) : cmd;
+}
+
+function routeCommand(msg: IncomingMessage, ctx: RouteContext): Command {
   const text = msg.text.trim();
   const cmd = /^\/([a-z_]+)(?:@\w+)?\s*([\s\S]*)$/i.exec(text);
   const specialists = wakeSpecialists(msg);
@@ -192,30 +248,38 @@ export function route(msg: IncomingMessage, ctx: RouteContext): Command {
     if (name === "stop") return { kind: "stop" };
     if (name === "status") return { kind: "status" };
     if (name === "help" || name === "start") return { kind: "help" };
+    if (name === "brief" && /^(on|off)$/i.test(topic)) return { kind: "brief_toggle", on: topic.toLowerCase() === "on" };
+    if ((SYSTEM_COMMANDS as readonly string[]).includes(name)) return { kind: "system", name: name as SystemCommand, arg: topic };
     const mode = MODE_COMMANDS[name];
-    if (mode) {
-      const steps = planForMode(mode, specialists);
-      return { kind: "discuss", mode, topic, agents: agentsOf(steps), steps };
+    if (mode) return discuss(mode, topic, planForMode(mode, specialists));
+    const special = SPECIAL_COMMANDS[name];
+    if (special) {
+      if (special.needsTopic && !topic) return { kind: "help" };
+      return discuss("direct", topic, special.steps.map((s) => ({ ...s, agents: [...s.agents] })));
     }
     // "/atlas what do you think" works as a direct mention.
-    if (isAgentId(name)) {
-      const steps = planForMode("direct", specialists, [name]);
-      return { kind: "discuss", mode: "direct", topic: "", agents: agentsOf(steps), steps };
-    }
+    if (isAgentId(name)) return discuss("direct", "", planForMode("direct", specialists, [name]));
     return { kind: "help" };
   }
 
   const mentioned = uniq([...(msg.replyToAgent ? [msg.replyToAgent] : []), ...findMentions(text)]);
-  if (mentioned.length) {
-    const steps = planForMode("direct", specialists, mentioned);
-    return { kind: "discuss", mode: "direct", topic: "", agents: agentsOf(steps), steps };
-  }
+  if (mentioned.length) return discuss("direct", "", planForMode("direct", specialists, mentioned));
 
   // Plain chat: specialists that woke up plus the most relevant core members.
   // Technical/visual messages need fewer generalists.
   const coreCount = specialists.length ? 1 : LIMITS.chatAgents;
-  const steps = planForMode("chat", specialists, pickChatAgents(text, ctx, coreCount));
-  return { kind: "discuss", mode: "chat", topic: "", agents: agentsOf(steps), steps };
+  return discuss("chat", "", planForMode("chat", specialists, pickChatAgents(text, ctx, coreCount)));
+}
+
+/**
+ * Live voice call: a mention gives the floor directly; otherwise every relevant member
+ * bids and the director picks who speaks (see council/bids.ts).
+ */
+export function routeLive(msg: IncomingMessage): Command {
+  const mentioned = findMentions(msg.text).filter((a) => AGENTS[a].kind === "chat");
+  if (mentioned.length) return discuss("live", "", [{ agents: mentioned, parallel: false, turn: "normal" }]);
+  const specialists = wakeSpecialists(msg).filter((a) => a !== "iris");
+  return discuss("live", "", [{ agents: uniq([...CORE_AGENTS, ...specialists]), parallel: true, turn: "normal", bid: true }]);
 }
 
 export function agentsOf(steps: Step[]): AgentId[] {

@@ -1,17 +1,18 @@
 import type { Skill } from "../types";
+import { str } from "../types";
 
 export const memorySearch: Skill = {
   id: "memory.search",
   description:
-    "Search older group conversation and your own private memories. Use when the founder refers to something discussed before, or when past decisions matter.",
+    "Search older group conversation, past discussion summaries and your own private memories. Use when the founder refers to something discussed before, or when past decisions matter.",
   parameters: {
     type: "object",
-    properties: { query: { type: "string", description: "Keywords to search for" } },
+    properties: { query: { type: "string", description: "What to look for, in natural language" } },
     required: ["query"],
   },
   risk: "read",
   async run(args, ctx) {
-    const results = await ctx.store.search(ctx.chatId, ctx.agent, String(args.query ?? ""));
+    const results = await ctx.store.search(ctx.convId, ctx.agent, str(args.query));
     return results.length ? results.join("\n") : "No matching memories.";
   },
 };
@@ -27,9 +28,9 @@ export const memoryRemember: Skill = {
   },
   risk: "write",
   async run(args, ctx) {
-    const note = String(args.note ?? "").trim().slice(0, 500);
+    const note = str(args.note).trim().slice(0, 500);
     if (!note) return "Nothing saved: empty note.";
-    await ctx.store.addAgentMemory(ctx.chatId, ctx.agent, note);
+    await ctx.store.addAgentMemory(ctx.convId, ctx.agent, note);
     return "Saved.";
   },
 };
@@ -45,9 +46,9 @@ export const groupRecordFact: Skill = {
   },
   risk: "write",
   async run(args, ctx) {
-    const fact = String(args.fact ?? "").trim().slice(0, 500);
+    const fact = str(args.fact).trim().slice(0, 500);
     if (!fact) return "Nothing recorded: empty fact.";
-    await ctx.store.addGroupFact(ctx.chatId, fact, ctx.agent);
+    await ctx.store.addGroupFact(ctx.convId, fact, ctx.agent);
     return "Recorded in group memory.";
   },
 };

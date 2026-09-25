@@ -18,20 +18,55 @@
     }
   ],
 
+  // Semantic memory. Create with:
+  //   wrangler vectorize create ai-council-memory --dimensions=1024 --metric=cosine
+  "vectorize": [{ "binding": "VECTORIZE", "index_name": "ai-council-memory" }],
+
+  // Headless Chrome for browser.inspect / browser.test / browser.screenshot.
+  "browser": { "binding": "BROWSER" },
+
+  // Isolated Linux sandbox for Cipher and Forge (needs Docker running when you deploy).
+  "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile", "max_instances": 3 }],
+
   "durable_objects": {
-    "bindings": [{ "name": "COUNCIL_ROOM", "class_name": "CouncilRoom" }]
+    "bindings": [
+      { "name": "COUNCIL_ROOM", "class_name": "CouncilRoom" },
+      { "name": "Sandbox", "class_name": "Sandbox" }
+    ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CouncilRoom"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CouncilRoom"] },
+    { "tag": "v2", "new_sqlite_classes": ["Sandbox"] }
+  ],
+
+  // Daily brief (UTC) and housekeeping. 06:45 UTC; change to suit your timezone.
+  "triggers": { "crons": ["45 6 * * *"] },
 
   "vars": {
-    // Comma-separated Telegram chat ids allowed to use the council. Empty = any chat.
+    // Comma-separated Telegram group ids allowed to use the council. Empty = any group.
     "ALLOWED_CHAT_IDS": "",
-    // Which agent's bot receives the webhook and posts system notices.
-    "HOST_AGENT": "nexus"
+    // Your Telegram user id(s). Only these people can talk to the council. Empty = anyone.
+    "OWNER_USER_IDS": "",
+    // The group whose shared memory DMs with individual agents can read (defaults to the first allowed chat).
+    "HOME_CHAT_ID": "",
+    // Which agent's bot receives group messages and posts system notices.
+    "HOST_AGENT": "nexus",
+    // AI Gateway id for cost/log dashboards and caching. Empty = direct.
+    "AI_GATEWAY_ID": "",
+    // Max tokens per agent per UTC day. 0 = unlimited.
+    "DAILY_TOKEN_BUDGET_PER_AGENT": "400000",
+    // https URL of this Worker, for /call links, e.g. https://ai-council.<you>.workers.dev
+    "PUBLIC_URL": "",
+    // Optional Mini App link from @BotFather /newapp on the host bot, e.g. https://t.me/NexusCouncilBot/call
+    "MINIAPP_URL": "",
+    // Repos the GitHub and sandbox skills may touch, e.g. "damcheck/claude-cloud"
+    "GITHUB_REPOS": ""
   }
 
   // Secrets (wrangler secret put <NAME>):
   //   TELEGRAM_WEBHOOK_SECRET
   //   BOT_TOKEN_ATLAS, BOT_TOKEN_NOVA, BOT_TOKEN_SAGE, BOT_TOKEN_NEXUS,
   //   BOT_TOKEN_AXIOM, BOT_TOKEN_CIPHER, BOT_TOKEN_FORGE, BOT_TOKEN_IRIS
+  //   FIRECRAWL_API_KEY or BRAVE_API_KEY   (web.search)
+  //   GITHUB_TOKEN                          (fine-grained: contents, pull requests, actions read on GITHUB_REPOS)
 }

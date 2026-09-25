@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { CORE_AGENTS } from "../src/agents/registry";
-import { agentsOf, findMentions, pickChatAgents, route, wakeSpecialists } from "../src/council/router";
+import { agentsOf, findMentions, pickChatAgents, route, routeLive, wakeSpecialists } from "../src/council/router";
 import type { IncomingMessage } from "../src/types";
 
 const msg = (text: string, extra: Partial<IncomingMessage> = {}): IncomingMessage => ({
-  chatId: 1,
+  chatId: -100,
+  convId: -100,
   messageId: 1,
+  fromId: 42,
   fromName: "Dam",
   text,
   ...extra,
@@ -107,5 +109,49 @@ describe("plain chat", () => {
     if (c.kind !== "discuss") throw new Error("expected discuss");
     expect(agentsOf(c.steps).filter((a) => CORE_AGENTS.includes(a))).toHaveLength(1);
     expect(agentsOf(c.steps)).toContain("cipher");
+  });
+});
+
+describe("v2 commands", () => {
+  it("/premortem gives Atlas the pre-mortem and Sage the challenge", () => {
+    const c = route(msg("/premortem launch a Shopify app in 30 days"), ctx);
+    if (c.kind !== "discuss") throw new Error("expected discuss");
+    expect(c.steps.map((s) => s.agents[0])).toEqual(["atlas", "sage"]);
+    expect(c.steps[0]!.instruction).toContain("pre-mortem");
+    expect(c.topic).toBe("launch a Shopify app in 30 days");
+  });
+
+  it("commands that need a topic show help without one", () => {
+    expect(route(msg("/decide"), ctx).kind).toBe("help");
+    expect(route(msg("/personas"), ctx).kind).toBe("help");
+  });
+
+  it("list commands and toggles don't start a discussion", () => {
+    expect(route(msg("/actions"), ctx)).toEqual({ kind: "system", name: "actions", arg: "" });
+    expect(route(msg("/voice off"), ctx)).toEqual({ kind: "system", name: "voice", arg: "off" });
+    expect(route(msg("/brief on"), ctx)).toEqual({ kind: "brief_toggle", on: true });
+    expect(route(msg("/brief"), ctx).kind).toBe("discuss");
+  });
+
+  it("collapses everything to the DM agent in a private chat", () => {
+    const dm = { dmAgent: "cipher" as const, convId: 42 * 16 + 6 };
+    expect(route(msg("/council should we rewrite it?", dm), ctx)).toMatchObject({ kind: "discuss", agents: ["cipher"] });
+    const pm = route(msg("/premortem ship it", dm), ctx);
+    expect(pm.kind === "discuss" && pm.steps).toEqual([expect.objectContaining({ agents: ["cipher"], instruction: expect.stringContaining("pre-mortem") })]);
+    expect(route(msg("/cost", dm), ctx).kind).toBe("system");
+  });
+});
+
+describe("routeLive", () => {
+  it("lets everyone bid, with specialists when relevant", () => {
+    const c = routeLive(msg("how would we build the api for this?"));
+    if (c.kind !== "discuss") throw new Error("expected discuss");
+    expect(c.steps[0]!.bid).toBe(true);
+    expect(c.agents).toEqual(expect.arrayContaining([...CORE_AGENTS, "cipher"]));
+  });
+
+  it("gives the floor directly to a named member", () => {
+    const c = routeLive(msg("Forge, is that going to scale?"));
+    expect(c.kind === "discuss" && c.steps).toEqual([{ agents: ["forge"], parallel: false, turn: "normal" }]);
   });
 });

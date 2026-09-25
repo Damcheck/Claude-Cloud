@@ -35,8 +35,11 @@ describe("prompts", () => {
 describe("skills", () => {
   it("exposes only permitted skills with function-safe names", () => {
     const names = toolsFor("sage").map((t) => t.function.name);
-    expect(names).toEqual(["memory_search", "memory_remember", "web_fetch"]);
-    expect(toolsFor("iris").map((t) => t.function.name)).toEqual(["vision_inspect"]);
+    expect(names).toContain("claims_record");
+    expect(names).toContain("web_search");
+    expect(names).not.toContain("github_write");
+    expect(names.every((n) => /^[a-zA-Z0-9_-]+$/.test(n))).toBe(true);
+    expect(toolsFor("iris").map((t) => t.function.name)).toEqual(["vision_inspect", "browser_screenshot"]);
     expect(toolName("group.record_fact")).toBe("group_record_fact");
   });
 });
