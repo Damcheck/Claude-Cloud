@@ -1,4 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
+import { ensureAi } from "../ai/workers-ai";
 import { postAs } from "../council/post";
 import { MemoryStore } from "../memory/store";
 import type { Env } from "../types";
@@ -16,6 +17,7 @@ import type { JobParams } from "./types";
  */
 export class CouncilJob extends WorkflowEntrypoint<Env, JobParams> {
   async run(event: WorkflowEvent<JobParams>, step: WorkflowStep): Promise<unknown> {
+    ensureAi(this.env);
     const p = event.payload;
     const store = new MemoryStore(this.env.DB, this.env.AI, this.env.VECTORIZE);
     const loopback = this.ctx.exports;

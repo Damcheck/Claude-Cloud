@@ -46,8 +46,8 @@ export async function runSelftest(env: Env): Promise<string> {
     ),
     timed("vision moondream", async () => (await runVision(env.AI, AGENTS.iris.model, { task: "caption", image: TEST_PNG, maxTokens: 40 })).slice(0, 60)),
     timed("speech aura→whisper", async () => {
-      const mp3 = await speak(env.AI, SYSTEM_MODELS.textToSpeech, "Hello council, this is a test.", { speaker: "athena", format: "mp3" });
-      const heard = await transcribe(env.AI, SYSTEM_MODELS.speechToText, mp3);
+      const audio = await speak(env.AI, SYSTEM_MODELS.textToSpeech, "Hello council, this is a test.", { speaker: "athena", format: "wav-48k" });
+      const heard = await transcribe(env.AI, SYSTEM_MODELS.speechToText, audio);
       if (!/council|test|hello/i.test(heard)) throw new Error(`heard "${heard}"`);
       return `heard "${heard.slice(0, 40)}"`;
     }),
@@ -59,13 +59,11 @@ export async function runSelftest(env: Env): Promise<string> {
   const bindings = [
     ["Vectorize", !!env.VECTORIZE],
     ["Browser", !!env.BROWSER],
-    ["Sandbox", !!env.Sandbox],
     ["Workflows (JOBS)", !!env.JOBS],
     ["Worker Loader", !!env.LOADER],
     ["R2 backups", !!env.BACKUPS],
     ["AI Gateway", !!env.AI_GATEWAY_ID],
     ["web search key", !!(env.FIRECRAWL_API_KEY || env.BRAVE_API_KEY)],
-    ["GitHub token", !!env.GITHUB_TOKEN],
     ["owner lock", !!env.OWNER_USER_IDS],
   ] as const;
   const bots = AGENT_IDS.map((a) => `${AGENTS[a].emoji}${botToken(env, a) ? "✅" : "❌"}`).join(" ");

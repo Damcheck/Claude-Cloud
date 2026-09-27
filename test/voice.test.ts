@@ -1,6 +1,34 @@
 import { describe, expect, it } from "vitest";
+import { renderApp } from "../src/voice/app";
 import { parseFluxMessage } from "../src/voice/flux";
 import { EnergyVad, mulawDecodeSample, mulawEncodeSample, mulawToPcm16, pcm16ToWav, twiml, validateTwilioSignature } from "../src/voice/phone";
+
+describe("video call app", () => {
+  it("offers camera preview and sends only compressed ephemeral frames", () => {
+    const html = renderApp();
+    expect(html).toContain('id="cameraView"');
+    expect(html).toContain('getUserMedia({ video:');
+    expect(html).toContain('toDataURL("image/jpeg", 0.55)');
+    expect(html).toContain('type: "frame_clear"');
+    expect(html).toContain('class="portrait"');
+    expect(html).toContain("createAnalyser()");
+    expect(html).toContain('class="mouth"');
+    expect(html).toContain('id="interrupt"');
+    expect(html).toContain('data-view="intelligence"');
+    expect(html).toContain('id="replayPanel"');
+    expect(html).toContain('type:"os_snapshot"');
+    expect(html).toContain("getDisplayMedia");
+    expect(html).toContain('type:"floor"');
+    expect(html).toContain("requestFullscreen");
+    expect(html).toContain('class="mouth-layer"');
+    expect(html).toContain('atlas:{x:50.4,y:49.6,w:16.0}');
+    expect(html).toContain('sage:{x:50.3,y:46.8,w:12.0}');
+    expect(html).toContain("buildSpeechMap(buffer)");
+    expect(html).toContain('id="roundtable"');
+    expect(html).toContain('class="council-table"');
+    expect(html).toContain("--seat-x");
+  });
+});
 
 describe("μ-law", () => {
   it("round-trips within quantization error", () => {

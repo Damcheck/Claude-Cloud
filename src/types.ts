@@ -4,6 +4,9 @@ import type { JobParams } from "./jobs/types";
 
 export interface Env {
   AI: Ai;
+  /** Local-lite REST fallback. Never configure these in a deployed Worker. */
+  LOCAL_CF_ACCOUNT_ID?: string;
+  LOCAL_CF_API_TOKEN?: string;
   DB: D1Database;
   COUNCIL_ROOM: DurableObjectNamespace<CouncilRoom>;
   /** Optional bindings: the skills that need them turn themselves off when missing. */
@@ -18,11 +21,13 @@ export interface Env {
   Sandbox?: DurableObjectNamespace<Sandbox>;
 
   ALLOWED_CHAT_IDS: string;
-  /** Telegram user ids allowed to talk to the council. Empty = anyone (not recommended). */
+  /** Telegram user ids allowed to talk to the council. Empty = nobody (fail closed). */
   OWNER_USER_IDS: string;
   /** The group whose shared memory DMs with individual agents can read. */
   HOME_CHAT_ID: string;
   HOST_AGENT: string;
+  /** When true, group agents without their own Telegram bot token stay unavailable. */
+  STRICT_BOT_IDENTITIES?: string;
   /** AI Gateway id for logs, cost and caching. Empty = call Workers AI directly. */
   AI_GATEWAY_ID: string;
   /** Max tokens (prompt + completion) each agent may use per UTC day. 0 = unlimited. */
@@ -41,6 +46,8 @@ export interface Env {
   SHOPIFY_THEME_ID?: string;
   /** Phone numbers allowed to call the council (E.164, comma-separated). */
   OWNER_PHONE_NUMBERS?: string;
+  /** Preferred Telegram sticker-set short names, comma-separated. */
+  TELEGRAM_STICKER_SETS?: string;
 
   TELEGRAM_WEBHOOK_SECRET: string;
   FIRECRAWL_API_KEY?: string;
@@ -60,6 +67,7 @@ export interface Env {
 }
 
 export type AgentId = "atlas" | "nova" | "sage" | "nexus" | "axiom" | "cipher" | "forge" | "iris";
+export type ReasoningMode = "fast" | "normal" | "deep";
 
 export type Mode = "chat" | "direct" | "council" | "debate" | "brainstorm" | "critic" | "live";
 
@@ -75,6 +83,8 @@ export interface TranscriptMessage {
   speakerName: string;
   text: string;
   createdAt: number;
+  /** Telegram's native message id, when this transcript item was posted in Telegram. */
+  telegramMessageId?: number;
 }
 
 /** A normalized inbound human message, independent of Telegram's shape. */
@@ -97,6 +107,10 @@ export interface IncomingMessage {
   voiceFileId?: string;
   document?: { fileId: string; name: string; mimeType?: string };
   replyToAgent?: AgentId;
+  /** Native Telegram message being quoted by the founder. */
+  replyToMessageId?: number;
+  replyToSpeakerName?: string;
+  replyToText?: string;
   /** Filled by the room after transcription. */
   viaVoice?: boolean;
 }

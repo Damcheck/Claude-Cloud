@@ -1,7 +1,7 @@
 import { buildSystemPrompt } from "../agents/prompts";
 import { AGENTS } from "../agents/registry";
 import { runChat, type CallOptions } from "../ai/workers-ai";
-import { LIMITS } from "../config";
+import { LIMITS, SYSTEM_MODELS } from "../config";
 import type { MemoryStore } from "../memory/store";
 import type { AgentId, TranscriptMessage } from "../types";
 
@@ -39,14 +39,18 @@ export function parseBid(agent: AgentId, raw: string): Bid {
 export function chooseSpeakers(bids: Bid[], utterance: string, max: number = LIMITS.liveMaxSpeakers, min: number = LIMITS.liveMinImportance): AgentId[] {
   const ranked = [...bids].sort((a, b) => b.importance - a.importance);
   const chosen = ranked.filter((b) => b.wantToSpeak && b.importance >= min).slice(0, max);
-  if (!chosen.length && /\?\s*$|\b(what|how|why|should|can|could|would|who|which)\b/i.test(utterance) && ranked[0]) {
+  // Silence feels broken in a call. Any meaningful founder utterance gets at least one
+  // speaker even if every bid was malformed, timid, or below the normal threshold.
+  if (!chosen.length && utterance.replace(/[^\p{L}\p{N}]/gu, "").length >= 2 && ranked[0]) {
     return [ranked[0].agent];
   }
   return chosen.map((b) => b.agent);
 }
 
-const BID_INSTRUCTION = `You're in a live voice call with the founder and the other council members. Decide whether YOU should speak next.
-Speak only if you have something new and useful given your role; stay quiet if others will cover it or it isn't your area.
+const BID_INSTRUCTION = `You're in a live voice call with the founder and the other council members. Listen to the exact wording and the recent turn sequence, then decide whether YOU should speak next.
+The founder usually speaks naturally without commands or names. Infer attention like a human: a short "why?", "go on", "prove that", "what do you mean?", "do it", or second-person reference normally belongs to the most recent speaker; "both of you" belongs to the last two; "everyone/the council" opens the floor; a role-specific request belongs to the relevant expert.
+Bid very strongly if the founder implicitly addressed you, asked for your specialty, or continued your last point. Speak if you have something new and useful; stay quiet if the remark clearly belongs to somebody else.
+Bid strongly when another member just made a consequential claim you can specifically challenge, correct or extend. Do not bid merely to agree.
 Reply with ONLY this JSON and nothing else:
 {"want_to_speak": true|false, "importance": 0.0-1.0, "reason": "a few words"}`;
 
@@ -78,14 +82,14 @@ export async function collectBids(
         });
         const r = await runChat(
           ai,
-          a.voiceModel,
+          SYSTEM_MODELS.fast,
           [
             { role: "system", content: system },
             { role: "user", content: `Call so far:\n${recent}\n\n${BID_INSTRUCTION}` },
           ],
-          { maxTokens: 80, ...callOptions, metadata: { ...callOptions.metadata, agent, purpose: "bid" } },
+          { maxTokens: 80, ...callOptions, timeoutMs: 3_000, metadata: { ...callOptions.metadata, agent, purpose: "bid" } },
         );
-        await store.recordUsage(convId, agent, a.voiceModel, r.usage.promptTokens, r.usage.completionTokens);
+        await store.recordUsage(convId, agent, SYSTEM_MODELS.fast, r.usage.promptTokens, r.usage.completionTokens);
         return parseBid(agent, r.text);
       } catch (err) {
         console.warn(`${a.name} bid failed`, err);

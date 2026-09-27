@@ -1,19 +1,19 @@
 /** Hard budgets. Every loop in the council is bounded by one of these. */
 export const LIMITS = {
   /** Max agent posts in a single discussion (one human trigger). */
-  maxPostsPerDiscussion: 15,
+  maxPostsPerDiscussion: 30,
   /** Max rounds in /debate. */
   debateRounds: 3,
   /** Pause between two agent posts, so the chat reads like a conversation. */
-  cooldownMs: 1500,
+  cooldownMs: 500,
   /** Max skill (tool) calls an agent may make during one turn. */
   maxToolCallsPerTurn: 4,
   /** Coding specialists get more, because code → run → fix needs several steps. */
   maxToolCallsPerTurnSpecialist: 8,
   /** Max output tokens for a normal agent turn. */
-  maxOutputTokens: 700,
+  maxOutputTokens: 1400,
   /** Max output tokens when speaking (voice notes and live calls). */
-  maxVoiceOutputTokens: 260,
+  maxVoiceOutputTokens: 400,
   /** How many recent messages of the chat each agent sees. */
   transcriptWindow: 40,
   /** Max core agents answering a plain chat message. */
@@ -44,5 +44,7 @@ export const SYSTEM_MODELS = {
   textToSpeech: "@cf/deepgram/aura-2-en",
   embeddings: "@cf/baai/bge-m3",
   /** Summaries and speak bids: fast and cheap. */
-  fast: "@cf/zai-org/glm-5.3-flash",
+  fast: "@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+  /** Different provider family when the low-latency model is unavailable. */
+  interactiveBackup: "@cf/meta/llama-3.1-8b-instruct-fp8",
 } as const;

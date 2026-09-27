@@ -1,12 +1,12 @@
 import { runChat, runVision, type CallOptions, type ChatMessage, type ChatResult, type ContentPart } from "../ai/workers-ai";
 import { decide, resolveLevel, wrapUntrusted } from "../autonomy/policy";
-import { LIMITS } from "../config";
+import { LIMITS, SYSTEM_MODELS } from "../config";
 import { cleanReply } from "../council/text";
 import type { AutonomyLevel } from "../memory/ops";
 import { resolveSkills, toolName } from "../skills/registry";
 import type { Skill, SkillContext } from "../skills/types";
 import { needsApproval } from "../skills/types";
-import type { Mode, TranscriptMessage } from "../types";
+import type { Mode, ReasoningMode, TranscriptMessage } from "../types";
 import { agentContext } from "./context";
 import { effectiveAgent } from "./overrides";
 import { buildSystemPrompt, buildUserPrompt, type TurnKind } from "./prompts";
@@ -23,6 +23,16 @@ export interface TurnRequest {
   speaking?: boolean;
   /** Evals: use this model instead of the agent's own. */
   modelOverride?: string;
+  /** Room chat/call path: prioritise bounded response latency over the agent's deep model. */
+  fastInteractive?: boolean;
+  /** Per-turn cap selected by the conversation director. */
+  maxOutputTokens?: number;
+  /** Use the member's configured model rather than the routing model. */
+  preferPrimaryModel?: boolean;
+  /** Adaptive deliberation depth chosen for this particular turn. */
+  reasoningMode?: ReasoningMode;
+  /** The room assigned this member the floor, so [PASS] is not an acceptable result. */
+  mustRespond?: boolean;
   /** Evals / self-improvement: use this personality instead of the agent's own. */
   personalityOverride?: string;
 }
@@ -116,7 +126,27 @@ export async function runAgentTurn(req: TurnRequest, ctx: SkillContext): Promise
         detail: { mode: req.mode, turn: req.turn, instruction: req.instruction?.slice(0, 300), calls, reply: finalText.slice(0, 1500) },
       })
       .catch((err) => console.warn("trace failed", err));
+    const repDelta = outcome === "posted" ? 0.25 : outcome === "error" ? -1 : -0.1;
+    await ctx.store.councilOs?.reputationEvent(ctx.convId, ctx.agent, "reliability", repDelta, `turn ${outcome}`, "discussion", ctx.discussionId ?? undefined).catch(() => {});
   }
+}
+
+/** Give reasoning models room to think, then enforce the director's visible chat size. */
+export function boundVisibleReply(text: string | null, tokenBudget: number | undefined): string | null {
+  if (!text || !tokenBudget) return text;
+  const words = text.trim().split(/\s+/);
+  const maxWords = Math.max(8, Math.floor(tokenBudget * 0.72));
+  if (words.length <= maxWords) return text;
+  const candidate = words
+    .slice(0, maxWords)
+    .join(" ")
+    // A token cut after "Next steps: 1." looks broken and Telegram cannot recover
+    // the omitted list. Remove dangling enumeration before finding a safe sentence.
+    .replace(/(?:^|\s)(?:\d+\.|\d+\)|[-*])\s*$/, "")
+    .replace(/[\s:;,\-–—]+$/, "");
+  const sentenceEnd = Math.max(candidate.lastIndexOf("."), candidate.lastIndexOf("!"), candidate.lastIndexOf("?"));
+  if (sentenceEnd >= candidate.length * 0.45) return candidate.slice(0, sentenceEnd + 1);
+  return `${candidate.replace(/[,:;\-–—]+$/, "")}…`;
 }
 
 async function chatTurn(
@@ -147,8 +177,9 @@ async function chatTurn(
     }
   }
 
-  // Live calls favour latency: no skills. Voice notes keep them.
-  const skills = live ? [] : await resolveSkills(ctx.agent, ctx.env, ctx.store, { consultDepth: ctx.consultDepth });
+  // Interactive room conversation favours reliable human cadence. Deliberate commands
+  // and background work retain tools; natural chat/debate does not wait on tool loops.
+  const skills = live || req.fastInteractive ? [] : await resolveSkills(ctx.agent, ctx.env, ctx.store, { consultDepth: ctx.consultDepth });
   const promptInput = {
     agent: ctx.agent,
     mode: req.mode,
@@ -163,6 +194,7 @@ async function chatTurn(
     trackRecord: trackRecord.right + trackRecord.wrong + trackRecord.open > 0 ? trackRecord : undefined,
     personality: req.personalityOverride ?? agent.personality,
     lessons,
+    reasoningMode: req.reasoningMode,
     extraContext: [powers, imageNote].filter(Boolean).join("\n\n"),
   };
   const userText = buildUserPrompt(promptInput);
@@ -173,32 +205,62 @@ async function chatTurn(
     { role: "user", content: userContent },
   ];
 
-  const callOptions: CallOptions = { ...ctx.callOptions, metadata: { ...ctx.callOptions.metadata, agent: ctx.agent } };
-  const maxTokens = req.speaking ? LIMITS.maxVoiceOutputTokens : LIMITS.maxOutputTokens;
-  let model = req.modelOverride ?? (req.speaking ? agent.voiceModel : agent.model);
-  let usedFallback = !!req.modelOverride; // evals measure the model itself: no backup
+  const callOptions: CallOptions = {
+    ...ctx.callOptions,
+    reasoningMode: req.reasoningMode,
+    metadata: { ...ctx.callOptions.metadata, agent: ctx.agent, reasoning: req.reasoningMode ?? "normal" },
+  };
+  const interactive = !!req.fastInteractive;
+  const requestedMax = req.maxOutputTokens ?? (req.speaking ? 180 : interactive ? 180 : LIMITS.maxOutputTokens);
+  const visibleMaxTokens = Math.max(24, Math.min(requestedMax, req.speaking ? LIMITS.maxVoiceOutputTokens : LIMITS.maxOutputTokens));
+  // Several selected frontier/reasoning models consume completion tokens internally.
+  // A small generation cap can yield no visible answer at all, so compactness is
+  // enforced after generation rather than starving their reasoning process.
+  const reasoningFloor = req.reasoningMode === "deep" ? 1_600 : req.reasoningMode === "fast" ? 500 : 800;
+  const generationMaxTokens = interactive && req.preferPrimaryModel ? Math.max(reasoningFloor, visibleMaxTokens) : visibleMaxTokens;
+  // Interactive conversation uses a short, cross-provider chain. Personality and memory
+  // remain agent-specific even when the inference engine falls back.
+  const visiblePrimary = req.speaking ? agent.voiceModel : agent.model;
+  const candidates = req.modelOverride
+    ? [req.modelOverride]
+    : interactive && req.preferPrimaryModel
+      ? [...new Set([visiblePrimary, agent.fallbackModel, SYSTEM_MODELS.interactiveBackup])]
+    : interactive
+      ? [...new Set([SYSTEM_MODELS.fast, SYSTEM_MODELS.interactiveBackup])]
+      : [...new Set([req.speaking ? agent.voiceModel : agent.model, agent.fallbackModel])];
+  let modelIndex = 0;
   const tools = skills.map((s) => ({
     type: "function" as const,
     function: { name: toolName(s.id), description: s.description, parameters: s.parameters },
   }));
 
-  /** One model call; switches to the backup model (once) on error or an empty answer. */
+  /** One model call; advances through the bounded provider chain on error/empty output. */
   const call = async (withTools: boolean): Promise<ChatResult> => {
     const t = withTools ? tools : undefined;
-    try {
-      const r = await runChat(ctx.env.AI, model, messages, { tools: t, maxTokens, ...callOptions });
-      meter.add(model, r);
-      if (r.text.trim() || r.toolCalls.length || usedFallback) return r;
-      console.warn(`${agent.name}: empty answer from ${model}, trying backup`);
-    } catch (err) {
-      if (usedFallback) throw err;
-      console.warn(`${agent.name}: ${model} failed, trying backup ${agent.fallbackModel}`, err);
+    for (;;) {
+      const model = candidates[modelIndex]!;
+      try {
+        const timeoutMs = interactive && req.preferPrimaryModel
+          ? req.speaking
+            ? modelIndex === 0
+              ? 8_000
+              : 6_000
+            : modelIndex === 0
+              ? 28_000
+              : 12_000
+          : interactive
+            ? 7_000
+            : 45_000;
+        const r = await runChat(ctx.env.AI, model, messages, { tools: t, maxTokens: generationMaxTokens, ...callOptions, timeoutMs });
+        meter.add(model, r);
+        if (r.text.trim() || r.toolCalls.length || modelIndex === candidates.length - 1) return r;
+        console.warn(`${agent.name}: empty answer from ${model}, trying ${candidates[modelIndex + 1]}`);
+      } catch (err) {
+        if (modelIndex === candidates.length - 1) throw err;
+        console.warn(`${agent.name}: ${model} failed, trying ${candidates[modelIndex + 1]}`, err);
+      }
+      modelIndex++;
     }
-    usedFallback = true;
-    model = agent.fallbackModel;
-    const r = await runChat(ctx.env.AI, model, messages, { tools: t, maxTokens, ...callOptions });
-    meter.add(model, r);
-    return r;
   };
 
   const [rules, dryRun] = await Promise.all([
@@ -206,6 +268,41 @@ async function chatTurn(
     ctx.store.ops.isDryRun(ctx.convId).catch(() => false),
   ]);
   const state = { tainted: false };
+
+  const finishText = async (raw: string): Promise<string | null> => {
+    const cleaned = cleanReply(ctx.agent, raw);
+    if (cleaned || !req.mustRespond) return boundVisibleReply(cleaned, req.maxOutputTokens);
+    // The member was explicitly given the floor. Reject a silent [PASS] once and ask
+    // for a compact direct answer; if the provider still fails, return a human-visible
+    // acknowledgement instead of making the council appear offline.
+    const humanMessages = req.transcript.filter((message) => message.speaker === "human");
+    const latestHuman =
+      [...humanMessages]
+        .reverse()
+        .find((message) => !/\btake the floor and respond to the conversation's latest unresolved point\b/i.test(message.text))?.text ??
+      humanMessages.at(-1)?.text ??
+      req.topic;
+    messages.push({ role: "assistant", content: raw || "[PASS]" });
+    messages.push({
+      role: "user",
+      content: `You were explicitly given the floor and may not pass. The founder's latest words were: “${latestHuman.slice(0, 800)}”. Answer those exact words now in one or two useful, natural sentences from your own role. Do not apologize, ask them to repeat, claim you are listening, or output [PASS].`,
+    });
+    // A model that already chose PASS often repeats it when asked again. Move to the
+    // configured fallback while preserving this agent's persona, memory and transcript.
+    for (let rescue = 0; rescue < candidates.length; rescue++) {
+      if (modelIndex < candidates.length - 1) modelIndex++;
+      try {
+        const forced = await call(false);
+        const repaired = cleanReply(ctx.agent, forced.text);
+        if (repaired) return boundVisibleReply(repaired, req.maxOutputTokens);
+      } catch {
+        // `call` already advanced through provider errors. A final empty result is
+        // better omitted than posting the same canned failure sentence in a loop.
+      }
+      if (modelIndex >= candidates.length - 1) break;
+    }
+    return null;
+  };
 
   const maxCalls = agent.tier === "specialist" ? LIMITS.maxToolCallsPerTurnSpecialist : LIMITS.maxToolCallsPerTurn;
   let toolCallsUsed = 0;
@@ -224,7 +321,7 @@ async function chatTurn(
       toolsEnabled = false;
       continue;
     }
-    if (!result.toolCalls.length || !offerTools) return cleanReply(ctx.agent, result.text);
+    if (!result.toolCalls.length || !offerTools) return finishText(result.text);
 
     messages.push({ role: "assistant", content: result.text ?? "", tool_calls: result.toolCalls });
     for (const tc of result.toolCalls) {
@@ -234,7 +331,7 @@ async function chatTurn(
       messages.push({ role: "tool", tool_call_id: tc.id, name: tc.function.name, content: output });
     }
   }
-  return cleanReply(ctx.agent, (await call(false)).text);
+  return finishText((await call(false)).text);
 }
 
 export function parseArgs(raw: string): Record<string, unknown> | null {

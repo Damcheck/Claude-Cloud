@@ -23,6 +23,16 @@ describe("prompts", () => {
     expect(s).toContain(PASS_TOKEN);
     expect(s).toContain("Open Bloom Terminal");
     expect(s).toContain("I warned about churn");
+    expect(s).toContain("Disagreement is valuable");
+    expect(s).toContain("rage-bait");
+    expect(s).toContain("senior expert");
+  });
+
+  it("makes live speech natural, complete, and personality-specific", () => {
+    const s = buildSystemPrompt({ ...base, mode: "live", speaking: true });
+    expect(s).toContain("Sound spontaneous and present");
+    expect(s).toContain("complete the thought before yielding");
+    expect(s).toContain("permanent speaking style");
   });
 
   it("marks the agent's own past messages and states the round", () => {

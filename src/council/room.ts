@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import { SPECIAL_INSTRUCTIONS } from "../agents/prompts";
 import { AGENTS, AGENT_IDS, displayName, isAgentId } from "../agents/registry";
-import { BudgetExceeded, CouncilFrozen, executeApproved, parseArgs, runAgentTurn } from "../agents/runner";
-import { bytesToBase64, runChat, type CallOptions } from "../ai/workers-ai";
+import { BudgetExceeded, executeApproved, parseArgs, runAgentTurn } from "../agents/runner";
+import { bytesToBase64, ensureAi, runChat, type CallOptions } from "../ai/workers-ai";
 import { LIMITS, SYSTEM_MODELS } from "../config";
 import { callOptions as jobCallOptions, sharedConvIds } from "../jobs/common";
 import { extractGraph } from "../knowledge/graph";
@@ -19,9 +19,10 @@ import {
   downloadFile,
   editMessageHtml,
   sendAs,
+  sendContextStickerAs,
   sendSystem,
   sendSystemHtml,
-  sendTyping,
+  startChatActionHeartbeat,
   sendVoiceAs,
 } from "../telegram/api";
 import type { AgentId, CallbackAction, Env, Identity, IncomingMessage, Mode, TranscriptMessage } from "../types";
@@ -32,9 +33,11 @@ import { estimateSpeechMs, phoneSpeechStream, speechStream, speechToText, voiceN
 import { chooseSpeakers, collectBids } from "./bids";
 import { runSystemCommand, type CommandHost } from "./commands";
 import { findCrux } from "./crux";
+import { directNaturalMessage } from "./director";
 import { CONTRARIAN_INSTRUCTION, groupthink } from "./diversity";
 import { makeHooks } from "./post";
-import { route, routeLive, type Command, type Step } from "./router";
+import { contextualStickerEmoji } from "./media";
+import { findMentions, route, routeLive, type Command, type Step } from "./router";
 
 /** The discussion currently being played out in this conversation. */
 interface ActivePlan {
@@ -46,10 +49,19 @@ interface ActivePlan {
   posts: number;
   /** Image the agents should look at in this discussion. */
   imageFileId?: string;
+  /** Ephemeral camera frame for a live video call. Never persisted to Telegram or D1. */
+  imageDataUri?: string;
   /** Reply with voice notes (founder spoke, or /voice on). */
   voiceReplies: boolean;
   /** Live call: speak into the call as well as posting to Telegram. */
   live: boolean;
+  /** Founder's Telegram post that opened this discussion. */
+  rootTelegramMessageId?: number;
+  /** Most recent council post, used for visible agent-to-agent reply chains. */
+  lastAgentTelegramMessageId?: number;
+  lastAgent?: AgentId;
+  /** Keep media human and sparse: at most one contextual sticker per discussion. */
+  mediaReactionSent?: boolean;
 }
 
 interface QueuedAlert {
@@ -75,6 +87,7 @@ Talk normally: the most relevant members reply. Voice notes get voice answers. D
 
 Discussions
 /council /debate /brainstorm <topic> · /critic
+/introduce (every available member) · /everyone <request>
 /premortem <plan> · /decide <question> · /personas <idea>
 /forecast <yes/no question> · /resolve <#> yes|no
 /minutes · /brief (on|off)
@@ -87,11 +100,15 @@ Work that runs by itself
 Records
 /actions /claims /ideas /decisions /record /lessons /followups /graph <name>
 
+Council OS
+/worlds · /world <name> · /reputation · /relationships · /replay
+/warroom <decision or scenario> · /profile [key=value] · /tone <style> · /chamber
+
 Control
 /autonomy · /freeze · /unfreeze · /dryrun on|off · /audit · /why [agent] · /stop
 /cost · /models · /tools · /eval · /reflect · /scout · /selftest · /admin · /backup
 
-Voice: /call (live room, or phone) · /voice on|off
+Voice: /call (live room) · /voice on|off
 
 Specialists wake up on their own: 💻 Cipher and 🏗️ Forge for code and architecture, 👁️ Iris for images and links.`;
 
@@ -109,10 +126,12 @@ export class CouncilRoom extends DurableObject<Env> {
   private fluxOpening = new Set<WebSocket>();
   private fluxFailed = new Set<WebSocket>();
   private vads = new Map<WebSocket, EnergyVad>();
+  private liveImages = new Map<WebSocket, string>();
+  private pendingLiveText = new Map<WebSocket, { identity: Identity; text: string; cameraFrame?: string; timer: ReturnType<typeof setTimeout> }>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    this.store = new MemoryStore(env.DB, env.AI, env.VECTORIZE);
+    this.store = new MemoryStore(env.DB, ensureAi(env), env.VECTORIZE);
   }
 
   // =========================================================================
@@ -127,7 +146,18 @@ export class CouncilRoom extends DurableObject<Env> {
 
     const transcript = await this.store.recentMessages(identity.convId, LIMITS.transcriptWindow);
     const recentSpeakers = [...new Set(transcript.map((m) => m.speaker).reverse())].filter(isAgentId);
-    await this.execute(route(msg, { recentSpeakers }), msg, identity);
+    const fallback = route(msg, { recentSpeakers });
+    // A Telegram reply provides context, not an unconditional routing lock. “The rest
+    // of you answer” while replying to Nexus must still open the floor to the group.
+    const semantic = !msg.text.trim().startsWith("/") && !findMentions(msg.text).length;
+    const available = AGENT_IDS.filter((id) => AGENTS[id].kind === "chat" && (identity.dmAgent ? id === identity.dmAgent : !!botToken(this.env, id)));
+    const command = semantic
+      ? await directNaturalMessage({ ai: this.env.AI, store: this.store, msg, transcript, available, live: false, options: this.callOptions(identity) }).catch((err) => {
+          console.warn("conversation director failed; using deterministic route", err);
+          return null;
+        })
+      : null;
+    await this.execute(command ?? fallback, msg, identity);
   }
 
   async handleCallback(cb: CallbackAction): Promise<void> {
@@ -245,10 +275,12 @@ export class CouncilRoom extends DurableObject<Env> {
     this.ctx.acceptWebSocket(server, [kind]);
     server.serializeAttachment({ kind } satisfies SocketInfo);
     if (kind === "web") {
+      const os = await this.store.councilOs.snapshot(identity.convId).catch(() => null);
       server.send(
         JSON.stringify({
           type: "hello",
           streaming: true,
+          os,
           agents: AGENT_IDS.filter((id) => !identity.dmAgent || id === identity.dmAgent).map((id) => ({
             id,
             name: AGENTS[id].name,
@@ -276,7 +308,7 @@ export class CouncilRoom extends DurableObject<Env> {
       return;
     }
 
-    let data: { type?: string; text?: string };
+    let data: { type?: string; text?: string; image?: string; agent?: string };
     try {
       data = JSON.parse(message);
     } catch {
@@ -291,12 +323,26 @@ export class CouncilRoom extends DurableObject<Env> {
       case "played":
         return this.playbackDone();
       case "say":
-        if (data.text?.trim()) return this.handleLive(identity, data.text.trim());
+        if (data.text?.trim()) return this.queueLiveText(ws, identity, data.text.trim(), this.liveImages.get(ws));
+        return;
+      case "floor":
+        if (data.agent && isAgentId(data.agent)) return this.handleLive(identity, `${AGENTS[data.agent].name}, take the floor and respond to the conversation's latest unresolved point.`, this.liveImages.get(ws));
+        return;
+      case "frame":
+        if (data.image?.startsWith("data:image/jpeg;base64,") && data.image.length <= 500_000) this.liveImages.set(ws, data.image);
+        return;
+      case "frame_clear":
+        this.liveImages.delete(ws);
         return;
       case "stream_stop":
         this.flux.get(ws)?.close();
         this.flux.delete(ws);
         return;
+      case "os_snapshot": {
+        const os = await this.store.councilOs.snapshot(identity.convId).catch(() => null);
+        ws.send(JSON.stringify({ type: "os", os }));
+        return;
+      }
       case "ping":
         ws.send(JSON.stringify({ type: "pong" }));
         return;
@@ -304,10 +350,14 @@ export class CouncilRoom extends DurableObject<Env> {
   }
 
   async webSocketClose(ws: WebSocket): Promise<void> {
+    const pending = this.pendingLiveText.get(ws);
+    if (pending) clearTimeout(pending.timer);
+    this.pendingLiveText.delete(ws);
     this.flux.get(ws)?.close();
     this.flux.delete(ws);
     this.vads.delete(ws);
     this.fluxFailed.delete(ws);
+    this.liveImages.delete(ws);
     // Last listener left the call: stop talking into the void. The closing socket may
     // still be listed while this handler runs, so count only the others that are open.
     const others = this.ctx.getWebSockets().filter((s) => s !== ws && s.readyState === WebSocket.OPEN);
@@ -375,12 +425,16 @@ export class CouncilRoom extends DurableObject<Env> {
         await this.interrupt("interrupted");
         const settings = await this.store.chatSettings(identity.convId);
         const discussionId = await this.store.createDiscussion(identity.convId, command.mode, command.topic);
-        const human = msg.text + (msg.imageFileId ? " [sent an image]" : "");
+        const quoted = msg.replyToMessageId
+          ? `[Replying to ${msg.replyToSpeakerName ?? msg.replyToAgent ?? "a previous message"}${msg.replyToText ? `: “${msg.replyToText.slice(0, 500)}”` : ""}]\n`
+          : "";
+        const human = quoted + msg.text + (msg.imageFileId ? " [sent an image]" : "");
         await this.addTranscript(identity, discussionId, "human", human.trim(), msg.fromName, msg.messageId || undefined);
         await this.startPlan(identity, command.mode, command.topic, command.steps, {
           discussionId,
           imageFileId: await this.imageFor(msg, command.agents),
           voiceReplies: !!msg.viaVoice || !!settings?.voice_replies,
+          rootTelegramMessageId: msg.messageId || undefined,
         });
         return;
       }
@@ -406,19 +460,77 @@ export class CouncilRoom extends DurableObject<Env> {
     };
   }
 
-  private async handleLive(identity: Identity, text: string): Promise<void> {
+  private async handleLive(identity: Identity, text: string, cameraFrame?: string): Promise<void> {
     if (await this.store.ops.isFrozen()) return;
-    const msg: IncomingMessage = { chatId: identity.chatId, convId: identity.convId, messageId: 0, fromId: 0, fromName: "Founder", text, viaVoice: true, dmAgent: identity.dmAgent };
-    // Keep the Telegram chat as the single transcript of the call.
-    void sendSystem(this.env, identity.chatId, `🎙️ ${text}`, identity.dmAgent).catch(() => {});
+    const asksAboutVideo = !!cameraFrame && /\b(see|look|camera|video|show|wear(?:ing)?|hold(?:ing)?|screen|room|behind me|in front|this)\b/i.test(text);
+    const msg: IncomingMessage = {
+      chatId: identity.chatId,
+      convId: identity.convId,
+      messageId: 0,
+      fromId: 0,
+      fromName: "Founder",
+      text,
+      viaVoice: true,
+      dmAgent: identity.dmAgent,
+      imageFileId: asksAboutVideo ? "live-camera" : undefined,
+    };
+    const transcript = await this.store.recentMessages(identity.convId, LIMITS.transcriptWindow);
+    const manualFloor = /^\s*([a-z]+),\s*take the floor and respond to the conversation's latest unresolved point\.?\s*$/i.exec(text);
+    const unresolved = manualFloor
+      ? [...transcript].reverse().find((message) => message.speaker === "human" && !/\btake the floor and respond\b/i.test(message.text))?.text
+      : undefined;
+    const recentSpeakers = [...new Set(transcript.map((m) => m.speaker).reverse())].filter(isAgentId);
     await this.interrupt("interrupted");
-    const command = identity.dmAgent
+    const fallback = identity.dmAgent
       ? ({ kind: "discuss", mode: "live", topic: "", agents: [identity.dmAgent], steps: [{ agents: [identity.dmAgent], parallel: false, turn: "normal" }] } as const)
-      : routeLive(msg);
+      : routeLive(msg, { recentSpeakers });
+    const available = identity.dmAgent ? [identity.dmAgent] : AGENT_IDS.filter((id) => AGENTS[id].kind === "chat");
+    const semantic = !findMentions(text).length;
+    const command = semantic
+      ? await directNaturalMessage({ ai: this.env.AI, store: this.store, msg, transcript, available, live: true, options: this.callOptions(identity) }).catch((err) => {
+          console.warn("live conversation director failed; using bid route", err);
+          return null;
+        }) ?? fallback
+      : fallback;
     if (command.kind !== "discuss") return;
     const discussionId = await this.store.createDiscussion(identity.convId, "live", "");
     await this.addTranscript(identity, discussionId, "human", text, "Founder (call)");
-    await this.startPlan(identity, "live", "", command.steps.map((s) => ({ ...s, agents: [...s.agents] })), { discussionId, voiceReplies: false, live: true });
+    await this.startPlan(
+      identity,
+      "live",
+      "",
+      command.steps.map((s) => ({
+        ...s,
+        agents: [...s.agents],
+        instruction: [
+          "instruction" in s ? s.instruction : undefined,
+          unresolved
+            ? `The founder manually gave you the floor. The floor-control sentence is not the topic. Answer this exact latest substantive founder message: “${unresolved.slice(0, 900)}”.`
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n\n"),
+      })),
+      {
+      discussionId,
+      voiceReplies: false,
+      live: true,
+      imageDataUri: asksAboutVideo ? cameraFrame : undefined,
+      },
+    );
+  }
+
+  /** Merge adjacent speech fragments such as “Atlas and Nova” + “only”. */
+  private async queueLiveText(ws: WebSocket, identity: Identity, text: string, cameraFrame?: string): Promise<void> {
+    const existing = this.pendingLiveText.get(ws);
+    if (existing) clearTimeout(existing.timer);
+    const combined = [existing?.text, text].filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    const timer = setTimeout(() => {
+      this.pendingLiveText.delete(ws);
+      this.broadcast({ type: "heard", text: combined });
+      void this.handleLive(identity, combined, cameraFrame ?? existing?.cameraFrame);
+    }, 300);
+    this.pendingLiveText.set(ws, { identity, text: combined, cameraFrame: cameraFrame ?? existing?.cameraFrame, timer });
   }
 
   private async settleConflict(cb: CallbackAction, id: number, useNew: boolean): Promise<void> {
@@ -440,18 +552,27 @@ export class CouncilRoom extends DurableObject<Env> {
     mode: Mode,
     topic: string,
     steps: Step[],
-    opts: { discussionId?: number; imageFileId?: string; voiceReplies?: boolean; live?: boolean } = {},
+    opts: { discussionId?: number; imageFileId?: string; imageDataUri?: string; voiceReplies?: boolean; live?: boolean; rootTelegramMessageId?: number } = {},
   ): Promise<void> {
+    const strictIdentities = this.env.STRICT_BOT_IDENTITIES === "true" && !identity.dmAgent && !opts.live;
+    const runnableSteps = steps
+      .map((step) => ({
+        ...step,
+        agents: strictIdentities ? step.agents.filter((agent) => !!botToken(this.env, agent)) : [...step.agents],
+      }))
+      .filter((step) => step.agents.length > 0);
     const plan: ActivePlan = {
       generation: await this.generation(),
       discussionId: opts.discussionId ?? (await this.store.createDiscussion(identity.convId, mode, topic)),
       mode,
       topic,
-      steps: steps.filter((s) => s.agents.length > 0),
+      steps: runnableSteps,
       posts: 0,
       imageFileId: opts.imageFileId,
+      imageDataUri: opts.imageDataUri,
       voiceReplies: !!opts.voiceReplies,
       live: !!opts.live,
+      rootTelegramMessageId: opts.rootTelegramMessageId,
     };
     await this.ctx.storage.put({ plan, planDueAt: Date.now() });
     await this.scheduleNext();
@@ -471,39 +592,70 @@ export class CouncilRoom extends DurableObject<Env> {
     const step = plan.steps[0];
     if (!step) return this.finish(plan, identity);
     const transcript = await this.store.recentMessages(identity.convId, LIMITS.transcriptWindow);
+    const direction = await this.store.ops.getSetting(`tone:${identity.convId}`);
 
     if (step.bid) return this.runBids(plan, step, transcript, identity);
     if (step.crux) return this.runCrux(plan, identity);
 
     const agents = step.parallel ? step.agents : step.agents.slice(0, 1);
-    const image = plan.imageFileId ? await this.loadImage(plan.imageFileId, identity) : undefined;
+    const image = plan.imageDataUri ?? (plan.imageFileId ? await this.loadImage(plan.imageFileId, identity) : undefined);
     const speaking = plan.voiceReplies || plan.live;
     const turn = (agent: AgentId, instruction = step.instruction) =>
       runAgentTurn(
-        { mode: plan.mode, turn: step.turn, topic: plan.topic, transcript, instruction, speaking },
+        {
+          mode: plan.mode,
+          turn: step.turn,
+          topic: plan.topic,
+          transcript,
+          instruction: [instruction, direction ? `Persistent meeting direction from the founder: ${direction}. Apply it to delivery and conflict intensity without reducing factual accuracy or safety.` : ""].filter(Boolean).join("\n\n"),
+          speaking,
+          fastInteractive: !!step.fast || plan.mode === "chat" || plan.mode === "direct" || plan.mode === "live",
+          maxOutputTokens: step.maxTokens,
+          preferPrimaryModel: !!step.primaryModel,
+          reasoningMode: step.reasoning ?? "normal",
+          // A scheduled step means this member was deliberately given the floor. Let the
+          // router decide who stays silent; once selected, [PASS] must be repaired.
+          mustRespond: true,
+        },
         { ...this.skillContext(agent, identity, transcript, image), discussionId: plan.discussionId },
       );
 
-    for (const a of agents) {
-      this.setState(a, "thinking");
-      void sendTyping(this.env, identity.dmAgent ?? a, identity.chatId, plan.voiceReplies ? "record_voice" : "typing");
-    }
-    const replies = await Promise.all(
-      agents.map(async (agent) => {
+    for (const a of agents) this.setState(a, "thinking");
+    const runOne = async (agent: AgentId) => {
         try {
-          return { agent, text: await turn(agent), notice: null as string | null };
+          const generated = await turn(agent);
+          const text =
+            generated ??
+            (step.fallback === "introduction"
+              ? `${displayName(agent)}\nI'm ${AGENTS[agent].name}, the council's ${AGENTS[agent].role.toLowerCase()}. I contribute that perspective whenever the founder calls on me.`
+              : null);
+          return { agent, text, notice: null as string | null };
         } catch (err) {
           console.error(`${agent} turn failed`, err);
-          const notice =
-            err instanceof BudgetExceeded ? `💸 ${displayName(agent)} hit its daily token budget.` : err instanceof CouncilFrozen ? null : `⚠️ ${displayName(agent)} couldn't respond.`;
+          const notice = err instanceof BudgetExceeded ? `💸 ${displayName(agent)} hit its daily token budget.` : null;
           return { agent, text: null, notice };
         }
-      }),
-    );
+      };
+    // Large “everyone” rounds used to burst six calls into one provider and lose random
+    // members to capacity errors. Keep blind context, but generate in small reliable batches.
+    const replies: Awaited<ReturnType<typeof runOne>>[] = [];
+    const typingStops = new Map<AgentId, () => void>();
+    for (let i = 0; i < agents.length; i += 2) {
+      const batch = agents.slice(i, i + 2);
+      if (!plan.live) {
+        for (const agent of batch) {
+          typingStops.set(
+            agent,
+            startChatActionHeartbeat(this.env, identity.dmAgent ?? agent, identity.chatId, plan.voiceReplies ? "record_voice" : "typing"),
+          );
+        }
+      }
+      replies.push(...(await Promise.all(batch.map(runOne))));
+    }
 
     // Groupthink guard: if the blind round came back nearly identical, the most typical
     // member argues the other side instead.
-    if (step.parallel && step.turn === "blind") {
+    if (step.parallel && step.turn === "blind" && !step.fast) {
       const answered = replies.filter((r) => r.text);
       const check = await groupthink(this.env.AI, answered.map((r) => r.text!)).catch(() => null);
       if (check) {
@@ -515,13 +667,40 @@ export class CouncilRoom extends DurableObject<Env> {
 
     for (const r of replies) {
       // A human spoke while we were thinking: drop this discussion's remaining output.
-      if (plan.generation !== (await this.generation())) return;
-      if (r.text && plan.posts < LIMITS.maxPostsPerDiscussion) await this.post(plan, identity, r.agent, r.text);
+      if (plan.generation !== (await this.generation())) {
+        typingStops.forEach((stop) => stop());
+        return;
+      }
+      if (r.text && plan.posts < LIMITS.maxPostsPerDiscussion) {
+        const replyTo = this.replyTarget(plan, step, r.agent, r.text, transcript);
+        try {
+          await this.post(plan, identity, r.agent, r.text, replyTo);
+          typingStops.get(r.agent)?.();
+          typingStops.delete(r.agent);
+          if (!plan.live && !plan.voiceReplies && !plan.mediaReactionSent) {
+            const founderText = [...transcript].reverse().find((message) => message.speaker === "human")?.text ?? plan.topic;
+            const emoji = contextualStickerEmoji(founderText, r.text);
+            if (emoji) {
+              const stickerId = await sendContextStickerAs(this.env, identity.dmAgent ?? r.agent, identity.chatId, emoji).catch((err) => {
+                console.warn("context sticker failed", err);
+                return undefined;
+              });
+              if (stickerId) plan.mediaReactionSent = true;
+            }
+          }
+        } finally {
+          typingStops.get(r.agent)?.();
+          typingStops.delete(r.agent);
+        }
+      }
       else {
+        typingStops.get(r.agent)?.();
+        typingStops.delete(r.agent);
         this.setState(r.agent, "listening");
-        if (r.notice) await sendSystem(this.env, identity.chatId, r.notice, identity.dmAgent).catch(() => {});
+        if (r.notice && !plan.live) await sendSystem(this.env, identity.chatId, r.notice, identity.dmAgent).catch(() => {});
       }
     }
+    typingStops.forEach((stop) => stop());
 
     if (step.parallel) plan.steps.shift();
     else {
@@ -539,7 +718,7 @@ export class CouncilRoom extends DurableObject<Env> {
     const winners = chooseSpeakers(bids, lastHuman);
     step.agents.filter((a) => !winners.includes(a)).forEach((a) => this.setState(a, "listening"));
     if (!winners.length) return this.finish(plan, identity);
-    plan.steps[0] = { agents: winners, parallel: false, turn: "normal" };
+    plan.steps[0] = { agents: winners, parallel: false, turn: "normal", fast: true, primaryModel: true, maxTokens: 100, reasoning: "normal" };
     await this.ctx.storage.put({ plan, planDueAt: Date.now() });
   }
 
@@ -579,7 +758,24 @@ export class CouncilRoom extends DurableObject<Env> {
     }
   }
 
-  private async post(plan: ActivePlan, identity: Identity, agent: AgentId, text: string): Promise<void> {
+  private replyTarget(plan: ActivePlan, step: Step, agent: AgentId, text: string, transcript: TranscriptMessage[]): number | undefined {
+    if (plan.live) return undefined;
+
+    // A member can choose a particular council post by addressing that member near the
+    // start. Use the newest Telegram post from that member, not merely a text mention.
+    const addressed = findMentions(text).find((id) => id !== agent);
+    if (addressed) {
+      const exact = [...transcript].reverse().find((m) => m.speaker === addressed && m.telegramMessageId);
+      if (exact?.telegramMessageId) return exact.telegramMessageId;
+      if (plan.lastAgent === addressed && plan.lastAgentTelegramMessageId) return plan.lastAgentTelegramMessageId;
+    }
+    // Parallel answers and summaries all anchor to the founder's original post. A
+    // sequential discussion becomes a visible reply chain between council members.
+    if (step.parallel || step.turn === "summary" || !plan.posts) return plan.rootTelegramMessageId;
+    return plan.lastAgentTelegramMessageId ?? plan.rootTelegramMessageId;
+  }
+
+  private async post(plan: ActivePlan, identity: Identity, agent: AgentId, text: string, replyToMessageId?: number): Promise<void> {
     const sender = identity.dmAgent ?? agent;
     let telegramId: number | undefined;
 
@@ -587,26 +783,39 @@ export class CouncilRoom extends DurableObject<Env> {
       this.setState(agent, "speaking");
       await Promise.all([this.speakToWeb(plan, identity, agent, text), this.speakToPhones(plan, identity, agent, text)]);
       this.broadcast({ type: "speak_end", agent, text });
-      telegramId = await sendAs(this.env, sender, identity.chatId, text).catch(() => undefined);
     } else if (plan.voiceReplies) {
       try {
         const ogg = await voiceNote(this.env.AI, agent, text, this.callOptions(identity));
         if (!ogg) throw new Error("nothing to say out loud");
         const fitsCaption = text.length <= LIMITS.telegramMaxCaption - 40 && !text.includes("```");
-        telegramId = await sendVoiceAs(this.env, sender, identity.chatId, ogg, fitsCaption ? text.replace(/[*_`#]/g, "") : undefined);
+        telegramId = await sendVoiceAs(
+          this.env,
+          sender,
+          identity.chatId,
+          ogg,
+          fitsCaption ? text.replace(/[*_`#]/g, "") : undefined,
+          replyToMessageId,
+          plan.rootTelegramMessageId,
+        );
         if (!fitsCaption) await sendAs(this.env, sender, identity.chatId, text);
       } catch (err) {
         console.warn("voice reply failed, sending text", err);
-        telegramId = await sendAs(this.env, sender, identity.chatId, text);
+        telegramId = await sendAs(this.env, sender, identity.chatId, text, undefined, replyToMessageId, plan.rootTelegramMessageId);
       }
       this.setState(agent, "listening");
     } else {
-      telegramId = await sendAs(this.env, sender, identity.chatId, text);
+      telegramId = await sendAs(this.env, sender, identity.chatId, text, undefined, replyToMessageId, plan.rootTelegramMessageId);
       this.setState(agent, "listening");
     }
 
     plan.posts++;
+    if (telegramId) {
+      plan.lastAgentTelegramMessageId = telegramId;
+      plan.lastAgent = agent;
+    }
     await this.addTranscript(identity, plan.discussionId, agent, text, AGENTS[agent].name, telegramId);
+    const target = findMentions(text).find((id) => id !== agent);
+    if (target) this.ctx.waitUntil(this.store.councilOs.recordInteraction(identity.convId, agent, target, text).catch(() => {}));
   }
 
   private async speakToWeb(plan: ActivePlan, identity: Identity, agent: AgentId, text: string): Promise<void> {
@@ -755,6 +964,7 @@ export class CouncilRoom extends DurableObject<Env> {
       return;
     }
     if (text.replace(/[^\p{L}\p{N}]/gu, "").length < 2) return;
+    if (ws) return this.queueLiveText(ws, identity, text, this.liveImages.get(ws));
     this.broadcast({ type: "heard", text });
     return this.handleLive(identity, text);
   }
@@ -774,8 +984,7 @@ export class CouncilRoom extends DurableObject<Env> {
       if (e.type === "start") {
         void this.ctx.storage.get<ActivePlan>("plan").then((plan) => (plan?.live ? this.interrupt("interrupted") : undefined));
       } else {
-        this.broadcast({ type: "heard", text: e.transcript });
-        void this.handleLive(identity, e.transcript);
+        void this.queueLiveText(ws, identity, e.transcript, this.liveImages.get(ws));
       }
     });
     this.fluxOpening.delete(ws);
@@ -890,6 +1099,11 @@ export class CouncilRoom extends DurableObject<Env> {
     const name = speakerName ?? (speaker === "human" ? "Founder" : AGENTS[speaker].name);
     const id = await this.store.addMessage({ chatId: identity.convId, discussionId, speaker, speakerName: name, text, createdAt: Date.now() }, telegramId);
     this.ctx.waitUntil(this.store.index(identity.convId, `msg:${id}`, `${name}: ${text}`, { kind: "message", speaker }));
+    this.ctx.waitUntil(
+      this.store.councilOs
+        .recordMeetingEvent({ convId: identity.convId, discussionId, kind: "message", actor: speaker, text, metadata: { speakerName: name, telegramMessageId: telegramId } })
+        .catch(() => {}),
+    );
   }
 
   /** Voice notes → text (Whisper); documents → Markdown saved for doc.read. */
@@ -983,8 +1197,8 @@ export class CouncilRoom extends DurableObject<Env> {
       "Specialists:",
       ...AGENT_IDS.filter((id) => AGENTS[id].tier !== "core").map(line),
       "",
-      `Skills: web search ${on(env.FIRECRAWL_API_KEY || env.BRAVE_API_KEY)} · GitHub ${on(env.GITHUB_TOKEN)} · sandbox ${on(env.Sandbox)} · browser ${on(env.BROWSER)} · memory search ${on(env.VECTORIZE)} · MCP ${on(env.MCP_SERVERS)} · custom tools ${on(env.LOADER)}`,
-      `Jobs ${on(env.JOBS)} · AI Gateway ${on(env.AI_GATEWAY_ID)} · backups ${on(env.BACKUPS)} · calls ${on(env.PUBLIC_URL || env.MINIAPP_URL)} · phone ${on(env.TWILIO_AUTH_TOKEN)}`,
+      `Skills: web search ${on(env.FIRECRAWL_API_KEY || env.BRAVE_API_KEY)} · browser ${on(env.BROWSER)} · memory search ${on(env.VECTORIZE)} · MCP ${on(env.MCP_SERVERS)} · custom tools ${on(env.LOADER)}`,
+      `Jobs ${on(env.JOBS)} · AI Gateway ${on(env.AI_GATEWAY_ID)} · backups ${on(env.BACKUPS)} · calls ${on(env.PUBLIC_URL || env.MINIAPP_URL)}`,
       "",
       running,
     ]

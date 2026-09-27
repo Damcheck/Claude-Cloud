@@ -20,16 +20,24 @@ export async function voiceNote(ai: Ai, agent: AgentId, markdown: string, opts?:
  * order, so the first sentence can start playing while the rest is still being generated.
  */
 export async function* speechStream(ai: Ai, agent: AgentId, markdown: string, opts?: CallOptions): AsyncGenerator<{ text: string; audioB64: string }> {
-  const chunks = speechChunks(speechText(markdown));
-  const pending = chunks.map((text) =>
-    speak(ai, SYSTEM_MODELS.textToSpeech, text, { speaker: AGENTS[agent].voice, format: "mp3" }, opts).then((bytes) => ({
-      text,
-      audioB64: bytesToBase64(bytes),
-    })),
-  );
-  // If the caller stops early (interruption), later chunks must not surface as unhandled rejections.
-  for (const p of pending) p.catch(() => {});
-  for (const p of pending) yield await p;
+  const chunks = speechChunks(speechText(markdown), 220);
+  // Generate in order instead of bursting several paid TTS calls at once. That prevents
+  // transient capacity errors from cutting off everything after the first sentence.
+  for (const text of chunks) {
+    let bytes: Uint8Array | undefined;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        bytes = await speak(ai, SYSTEM_MODELS.textToSpeech, text, { speaker: AGENTS[agent].voice, format: "wav-48k" }, opts);
+        break;
+      } catch (err) {
+        lastError = err;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 150 * 2 ** attempt));
+      }
+    }
+    if (!bytes) throw lastError;
+    yield { text, audioB64: bytesToBase64(bytes) };
+  }
 }
 
 /** Rough speaking time, used to schedule the next speaker if the client never reports playback end. */

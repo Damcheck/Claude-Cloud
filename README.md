@@ -111,14 +111,19 @@ Optional integrations:
 Anything optional that isn't configured simply switches off; `/status` and `/selftest`
 show what's on.
 
-**Important:** set `OWNER_USER_IDS`. If it's empty, anyone who can message the bots can use
-the council and your credits.
+**Important:** set `OWNER_USER_IDS`. The worker fails closed while it is empty, so nobody
+can use the bots until at least one owner id is configured.
 
 ## Development
 
 ```bash
-npm test          # 115 tests: routing, policy, runner (fake AI), missions, forecasts,
+npm test          # 148 tests: routing, policy, runner (fake AI), missions, forecasts,
                   # watchers, voice codecs, Twilio/initData auth, MCP, tools, schedule, …
 npm run typecheck
 cp .dev.vars.example .dev.vars && npm run dev
 ```
+
+Pull requests and pushes to `main` run the same type-check, test suite, and a Wrangler
+dry-run bundle in GitHub Actions. The CI bundle skips container rollout because GitHub's
+hosted runner does not build the Sandbox image; a real deployment still requires Docker
+for the container or `npm run deploy:no-sandbox` when the existing image should remain.

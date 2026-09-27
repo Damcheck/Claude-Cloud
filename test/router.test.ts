@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { CORE_AGENTS } from "../src/agents/registry";
-import { agentsOf, findMentions, pickChatAgents, route, routeLive, wakeSpecialists } from "../src/council/router";
+import { AGENTS, AGENT_IDS, CORE_AGENTS } from "../src/agents/registry";
+import { agentsOf, findMentions, implicitTargets, pickChatAgents, route, routeLive, wakeSpecialists } from "../src/council/router";
 import type { IncomingMessage } from "../src/types";
 
 const msg = (text: string, extra: Partial<IncomingMessage> = {}): IncomingMessage => ({
@@ -74,6 +74,7 @@ describe("specialists", () => {
     expect(wakeSpecialists(msg("my typescript build fails with a TypeError"))).toContain("cipher");
     expect(wakeSpecialists(msg("how should we handle the race condition in durable objects locking?"))).toContain("forge");
     expect(wakeSpecialists(msg("should we raise our prices?"))).toEqual([]);
+    expect(wakeSpecialists(msg("set up a safe cybersecurity attack lab"))).toEqual(expect.arrayContaining(["cipher", "forge"]));
   });
 
   it("wakes Iris first when an image is attached", () => {
@@ -96,6 +97,23 @@ describe("specialists", () => {
 });
 
 describe("plain chat", () => {
+  const allChatAgents = AGENT_IDS.filter((id) => AGENTS[id].kind === "chat");
+
+  it("routes a natural introduction request to every chat-capable member", () => {
+    const c = route(msg("Can everyone introduce themselves?"), ctx);
+    if (c.kind !== "discuss") throw new Error("expected discuss");
+    expect(c.agents).toEqual(allChatAgents);
+    expect(c.steps[0]).toMatchObject({ parallel: true, agents: allChatAgents, fallback: "introduction" });
+    expect(c.steps[0]!.instruction).toContain("must answer");
+  });
+
+  it("supports explicit /introduce and /everyone commands", () => {
+    const intro = route(msg("/introduce"), ctx);
+    expect(intro.kind === "discuss" && intro.agents).toEqual(allChatAgents);
+    const everyone = route(msg("/everyone Give one recommendation"), ctx);
+    expect(everyone.kind === "discuss" && everyone.agents).toEqual(allChatAgents);
+  });
+
   it("picks agents whose interests match", () => {
     expect(pickChatAgents("what would users think of the pricing and ux?", ctx, 1)).toEqual(["axiom"]);
   });
@@ -111,6 +129,36 @@ describe("plain chat", () => {
     if (c.kind !== "discuss") throw new Error("expected discuss");
     expect(agentsOf(c.steps).filter((a) => CORE_AGENTS.includes(a))).toHaveLength(1);
     expect(agentsOf(c.steps)).toContain("cipher");
+  });
+
+  it("keeps short natural follow-ups with the most recent speaker", () => {
+    const focus = { recentSpeakers: ["sage", "atlas"] as const };
+    expect(implicitTargets("Why?", focus)).toEqual(["sage"]);
+    const c = route(msg("Can you prove that?"), focus);
+    expect(c.kind === "discuss" && c.agents).toEqual(["sage"]);
+    expect(c.kind === "discuss" && c.steps[0]!.instruction).toContain("natural continuation");
+  });
+
+  it("understands both-of-you and whole-council language without commands", () => {
+    const focus = { recentSpeakers: ["nova", "atlas", "sage"] as const };
+    expect(implicitTargets("I want both of you to explain", focus)).toEqual(["nova", "atlas"]);
+    const pair = route(msg("Both of you, explain the disagreement"), focus);
+    expect(pair.kind === "discuss" && pair.agents).toEqual(["nova", "atlas"]);
+    const all = route(msg("What does everyone think about this?"), focus);
+    expect(all.kind === "discuss" && all.agents).toEqual(allChatAgents);
+  });
+
+  it("detects debate, brainstorming and criticism in natural language", () => {
+    expect(route(msg("Atlas and Nova, debate this idea"), ctx)).toMatchObject({ kind: "discuss", mode: "direct" });
+    expect(route(msg("I want you to debate this idea"), ctx)).toMatchObject({ kind: "discuss", mode: "debate" });
+    expect(route(msg("Brainstorm some launch ideas"), ctx)).toMatchObject({ kind: "discuss", mode: "brainstorm" });
+    expect(route(msg("Tear this plan apart"), ctx)).toMatchObject({ kind: "discuss", mode: "critic" });
+  });
+
+  it("uses richer role intent when no member is named", () => {
+    expect(pickChatAgents("Please verify this claim and give me the source", ctx, 1)).toEqual(["sage"]);
+    expect(pickChatAgents("Give me a viral campaign hook", ctx, 1)).toEqual(["nova"]);
+    expect(pickChatAgents("What are our next action items?", ctx, 1)).toEqual(["nexus"]);
   });
 });
 
@@ -145,6 +193,12 @@ describe("v2 commands", () => {
 });
 
 describe("routeLive", () => {
+  it("lets Iris inspect an active video frame before chat agents bid", () => {
+    const c = routeLive(msg("Iris, what do you see on camera?", { imageFileId: "live-camera" }));
+    if (c.kind !== "discuss") throw new Error("expected discuss");
+    expect(c.steps[0]).toMatchObject({ agents: ["iris"], parallel: false });
+  });
+
   it("lets everyone bid, with specialists when relevant", () => {
     const c = routeLive(msg("how would we build the api for this?"));
     if (c.kind !== "discuss") throw new Error("expected discuss");
@@ -154,6 +208,12 @@ describe("routeLive", () => {
 
   it("gives the floor directly to a named member", () => {
     const c = routeLive(msg("Forge, is that going to scale?"));
-    expect(c.kind === "discuss" && c.steps).toEqual([{ agents: ["forge"], parallel: false, turn: "normal" }]);
+    expect(c.kind === "discuss" && c.steps[0]).toMatchObject({ agents: ["forge"], parallel: false, turn: "normal", primaryModel: true });
+  });
+
+  it("keeps an unnamed live follow-up with the last speaker", () => {
+    const c = routeLive(msg("Why do you say that?"), { recentSpeakers: ["atlas", "nova"] });
+    expect(c.kind === "discuss" && c.agents).toEqual(["atlas"]);
+    expect(c.kind === "discuss" && c.steps[0]!.bid).not.toBe(true);
   });
 });

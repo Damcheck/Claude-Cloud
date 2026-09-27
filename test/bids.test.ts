@@ -26,11 +26,16 @@ describe("chooseSpeakers", () => {
     expect(chooseSpeakers(bids, "I think we should launch", 2)).toEqual(["nova", "sage"]);
   });
 
-  it("drops weak bids", () => {
-    expect(chooseSpeakers([bid("atlas", true, 0.1)], "ok cool", 2, 0.35)).toEqual([]);
+  it("uses the best weak bid rather than leaving a meaningful utterance in silence", () => {
+    expect(chooseSpeakers([bid("atlas", true, 0.1)], "ok cool", 2, 0.35)).toEqual(["atlas"]);
   });
 
   it("never leaves a direct question unanswered", () => {
     expect(chooseSpeakers([bid("atlas", false, 0.3), bid("axiom", false, 0.6)], "What do you think?", 2)).toEqual(["axiom"]);
+  });
+
+  it("never leaves a meaningful live utterance unanswered even when every agent declines", () => {
+    expect(chooseSpeakers([bid("atlas", false, 0), bid("nova", false, 0)], "Hello everyone", 2)).toEqual(["atlas"]);
+    expect(chooseSpeakers([bid("atlas", false, 0)], "...", 2)).toEqual([]);
   });
 });

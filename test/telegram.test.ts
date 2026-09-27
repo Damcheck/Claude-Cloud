@@ -1,8 +1,11 @@
-import { describe, expect, it } from "vitest";
-import { dmConvId, parseCallback, parseIncoming, type TelegramMessage } from "../src/telegram/api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { dmConvId, isOwner, parseCallback, parseIncoming, sendAs, type TelegramMessage } from "../src/telegram/api";
+import type { Env } from "../src/types";
 
 const human = { id: 42, is_bot: false, first_name: "Dam" };
 const group = { id: -100123, type: "supergroup" };
+
+afterEach(() => vi.unstubAllGlobals());
 
 describe("parseIncoming", () => {
   it("takes group messages only from the host bot", () => {
@@ -50,7 +53,26 @@ describe("parseIncoming", () => {
       text: "why?",
       reply_to_message: { message_id: 1, chat: group, from: { id: 7, is_bot: true, first_name: "Forge", username: "DamForgeBot" } },
     };
-    expect(parseIncoming(msg, "nexus", "nexus")?.replyToAgent).toBe("forge");
+    expect(parseIncoming(msg, "nexus", "nexus")).toMatchObject({
+      replyToAgent: "forge",
+      replyToMessageId: 1,
+      replyToSpeakerName: "Forge",
+    });
+  });
+
+  it("preserves the quoted message text so the addressed agent understands context", () => {
+    const parsed = parseIncoming(
+      {
+        message_id: 3,
+        chat: group,
+        from: human,
+        text: "I disagree",
+        reply_to_message: { message_id: 2, chat: group, from: { id: 9, is_bot: true, first_name: "Atlas", username: "AtlasBot" }, text: "The downside is larger than it looks." },
+      },
+      "nexus",
+      "nexus",
+    );
+    expect(parsed).toMatchObject({ replyToAgent: "atlas", replyToMessageId: 2, replyToText: "The downside is larger than it looks." });
   });
 });
 
@@ -61,5 +83,43 @@ describe("parseCallback", () => {
       "cipher",
     );
     expect(cb).toMatchObject({ convId: dmConvId(42, "cipher"), data: "ap:3:y", viaAgent: "cipher", messageId: 9 });
+  });
+});
+
+describe("owner allowlist", () => {
+  it("fails closed when OWNER_USER_IDS is empty", () => {
+    expect(isOwner({ OWNER_USER_IDS: "" } as Env, 42)).toBe(false);
+  });
+
+  it("accepts only explicitly configured owners", () => {
+    const env = { OWNER_USER_IDS: "7, 42" } as Env;
+    expect(isOwner(env, 42)).toBe(true);
+    expect(isOwner(env, 8)).toBe(false);
+  });
+});
+
+describe("native Telegram replies", () => {
+  it("falls back to the founder's native thread when a cross-bot target is unavailable", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        bodies.push(body);
+        const reply = body.reply_parameters as { message_id?: number } | undefined;
+        return new Response(
+          JSON.stringify(
+            reply?.message_id === 99
+              ? { ok: false, description: "Bad Request: message to be replied not found" }
+              : { ok: true, result: { message_id: 101, reply_to_message: { message_id: reply?.message_id } } },
+          ),
+          { headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+    const env = { BOT_TOKEN_SAGE: "test-token", HOST_AGENT: "nexus" } as Env;
+    await expect(sendAs(env, "sage", -100123, "Atlas, that claim is weak.", undefined, 99, 42)).resolves.toBe(101);
+    expect((bodies[0]!.reply_parameters as { message_id: number; allow_sending_without_reply: boolean })).toEqual({ message_id: 99, allow_sending_without_reply: false });
+    expect((bodies[1]!.reply_parameters as { message_id: number })).toMatchObject({ message_id: 42 });
   });
 });

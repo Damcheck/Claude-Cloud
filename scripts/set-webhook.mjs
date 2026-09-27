@@ -5,13 +5,16 @@
 // Usage:
 //   WEBHOOK_SECRET=... WORKER_URL=https://ai-council.<you>.workers.dev \
 //   BOT_TOKEN_NEXUS=... BOT_TOKEN_ATLAS=... (etc.) npm run telegram:setup
-const { WEBHOOK_SECRET, WORKER_URL } = process.env;
+const WEBHOOK_SECRET = process.env.WEBHOOK_SECRET || process.env.TELEGRAM_WEBHOOK_SECRET;
+const { WORKER_URL } = process.env;
 if (!WEBHOOK_SECRET || !WORKER_URL) {
   console.error("Set WEBHOOK_SECRET and WORKER_URL, plus BOT_TOKEN_<AGENT> for each bot.");
   process.exit(1);
 }
 const agents = ["atlas", "nova", "sage", "nexus", "axiom", "cipher", "forge", "iris"];
 const commands = [
+  ["introduce", "Every available council member introduces itself"],
+  ["everyone", "Every available member answers once"],
   ["council", "All core members: blind round, debate, summary"],
   ["debate", "Rounds of argument on a topic"],
   ["brainstorm", "Cooperative ideas"],

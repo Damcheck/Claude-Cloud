@@ -1,6 +1,6 @@
 import { formatTrackRecord } from "../agents/prompts";
 import { effectiveAgent } from "../agents/overrides";
-import { AGENTS, AGENT_IDS, displayName, isAgentId } from "../agents/registry";
+import { AGENTS, AGENT_IDS, CORE_AGENTS, displayName, isAgentId } from "../agents/registry";
 import { AUTONOMY_LEVELS } from "../autonomy/policy";
 import { startJob, parseMissionFlags, startMission } from "../jobs/start";
 import type { AutonomyLevel } from "../memory/ops";
@@ -40,6 +40,91 @@ export async function runSystemCommand(h: CommandHost, name: SystemCommand, arg:
   const words = arg.split(/\s+/).filter(Boolean);
 
   switch (name) {
+    // --------------------------------------------------------- Council OS
+    case "worlds": {
+      const active = await store.councilOs.ensureDefaultWorld(identity.convId);
+      const worlds = await store.councilOs.worlds(identity.convId);
+      return send(`🌍 Project worlds\n\n${worlds.map((w) => `${w.id === active.id ? "▶️" : "▫️"} #${w.id} ${w.name}${w.description ? ` — ${w.description}` : ""}`).join("\n")}\n\nSwitch with /world <id>; create with /world <new name>.`);
+    }
+    case "world": {
+      if (!arg) {
+        const active = await store.councilOs.ensureDefaultWorld(identity.convId);
+        return send(`🌍 Active world: #${active.id} ${active.name}${active.description ? `\n${active.description}` : ""}`);
+      }
+      const id = Number(arg.trim());
+      if (Number.isInteger(id) && id > 0) {
+        return send((await store.councilOs.selectWorld(identity.convId, id)) ? `🌍 Switched to project world #${id}. Its memories, relationships and replay are now active.` : "That project world does not exist here.");
+      }
+      const [name, description = ""] = arg.split("|").map((v) => v.trim());
+      const world = await store.councilOs.createWorld(identity.convId, name!, description);
+      return send(`🌍 Created and entered #${world.id} ${world.name}. Future Council OS state is isolated in this project world.`);
+    }
+    case "reputation": {
+      const os = await store.councilOs.snapshot(identity.convId);
+      const rows = os.reputation
+        .filter((r) => isAgentId(String(r.agent)))
+        .sort((a, b) => Number(b.founder_score) - Number(a.founder_score) || Number(b.reliability) - Number(a.reliability));
+      return send(`🏆 Council reputation — ${os.world.name}\n\n${rows.map((r, i) => `${i + 1}. ${displayName(r.agent as AgentId)} · founder ${Number(r.founder_score) >= 0 ? "+" : ""}${r.founder_score} · accuracy ${Math.round(r.accuracy)} · useful ${Math.round(r.usefulness)} · creative ${Math.round(r.creativity)} · reliable ${Math.round(r.reliability)} · W${r.wins}/L${r.losses}`).join("\n")}`);
+    }
+    case "relationships": {
+      const os = await store.councilOs.snapshot(identity.convId);
+      if (!os.relationships.length) return send(`🤝 Relationships — ${os.world.name}\n\nNo meaningful member-to-member interactions recorded yet.`);
+      return send(`🤝 Council relationships — ${os.world.name}\n\n${os.relationships.map((r) => `${displayName(r.source_agent as AgentId)} → ${displayName(r.target_agent as AgentId)}: trust ${Math.round(r.trust)}, respect ${Math.round(r.respect)}, tension ${Math.round(r.tension)} (${r.interactions} interactions)`).join("\n")}`);
+    }
+    case "replay": {
+      const os = await store.councilOs.snapshot(identity.convId);
+      const events = os.events.slice(0, 20).reverse();
+      return send(events.length ? `⏪ Replay — ${os.world.name}\n\n${events.map((e) => `${when(e.created_at)} · ${e.actor}${e.target ? ` → ${e.target}` : ""}: ${String(e.text).replace(/\s+/g, " ").slice(0, 180)}`).join("\n")}` : "No replay events in this world yet.");
+    }
+    case "warroom": {
+      if (arg.length < 8) return send("Usage: /warroom <decision, threat or scenario to simulate>");
+      const id = await store.councilOs.createSimulation(identity.convId, arg.slice(0, 100), arg, "war_room");
+      return h.startPlan("council", arg, [
+        {
+          agents: [...CORE_AGENTS],
+          parallel: true,
+          turn: "blind",
+          instruction: `WAR ROOM #${id}. Simulate this scenario independently from your role. State the most probable outcome, the dangerous outcome, the earliest signal, and the move the founder should make now. Commit to a clear position.`,
+        },
+        {
+          agents: [...CORE_AGENTS],
+          parallel: false,
+          turn: "followUp",
+          instruction: `WAR ROOM #${id}, cross-examination. Attack the weakest scenario or assumption from another named member, then revise your own probability if their evidence changes it.`,
+        },
+        {
+          agents: ["nexus"],
+          parallel: false,
+          turn: "summary",
+          instruction: `Close WAR ROOM #${id}: give the base case, upside, catastrophe, trigger signals, decision, owner and next review point. Preserve dissent rather than faking consensus.`,
+        },
+      ]);
+    }
+    case "profile": {
+      if (!arg) {
+        const os = await store.councilOs.snapshot(identity.convId);
+        return send(os.founderProfile.length ? `🧬 Founder model (inspectable)\n\n${os.founderProfile.map((p) => `${p.key}: ${p.value} (${Math.round(p.confidence * 100)}%, ${p.source})`).join("\n")}\n\nUpdate with /profile key=value.` : "The founder model is empty. Add an explicit preference with /profile key=value.");
+      }
+      const match = /^([^=]{2,80})=(.+)$/s.exec(arg);
+      if (!match) return send("Usage: /profile key=value — for example /profile risk_tolerance=high but never risk payroll");
+      await store.councilOs.setFounderTrait(identity.convId, match[1]!.trim(), match[2]!.trim());
+      return send(`🧬 Founder model updated: ${match[1]!.trim()} = ${match[2]!.trim()}`);
+    }
+    case "chamber":
+      return sendCallLink(h);
+    case "tone": {
+      const value = arg.trim().toLowerCase();
+      if (!value || value === "status") return send(`🎭 Meeting tone: ${(await store.ops.getSetting(`tone:${identity.convId}`)) ?? "natural"}\nSet with /tone ruthless|calm|aggressive|creative|skeptical|concise|natural.`);
+      if (value === "natural" || value === "reset" || value === "off") {
+        await store.ops.setSetting(`tone:${identity.convId}`, null);
+        return send("🎭 Meeting tone reset to natural.");
+      }
+      const allowed = ["ruthless", "calm", "aggressive", "creative", "skeptical", "concise"];
+      if (!allowed.includes(value)) return send(`Choose one: ${allowed.join(", ")}, natural.`);
+      await store.ops.setSetting(`tone:${identity.convId}`, value);
+      return send(`🎭 Persistent meeting tone: ${value}. This applies to text and calls until reset with /tone natural.`);
+    }
+
     // ------------------------------------------------------------ records
     case "actions": {
       const items = await store.openActions(shared);

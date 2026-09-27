@@ -1,4 +1,5 @@
 import { isAgentId } from "./agents/registry";
+import { ensureAi } from "./ai/workers-ai";
 import { LIMITS } from "./config";
 import { consolidateMemories } from "./knowledge/consolidate";
 import { startJob } from "./jobs/start";
@@ -15,6 +16,7 @@ import {
   parseIds,
   parseIncoming,
   parseReactions,
+  setMessageReaction,
   sendSystem,
   type TelegramUpdate,
 } from "./telegram/api";
@@ -72,7 +74,11 @@ async function handleTelegram(request: Request, env: Env, ctx: ExecutionContext,
         for (const r of parseReactions(update, agent)) {
           if (!isOwner(env, r.fromId)) continue;
           const msg = await store.messageByTelegramId(r.convId, r.messageId);
-          if (msg && isAgentId(msg.speaker)) await store.ops.addFeedback(r.convId, msg.speaker, msg.id, r.emoji, r.score);
+          if (msg && isAgentId(msg.speaker)) {
+            await store.ops.addFeedback(r.convId, msg.speaker, msg.id, r.emoji, r.score);
+            await store.councilOs.reputationEvent(r.convId, msg.speaker, "founder_score", r.score, `Founder reacted ${r.emoji}`, "message", msg.id).catch(() => {});
+            await store.councilOs.recordMeetingEvent({ convId: r.convId, kind: "reaction", actor: "founder", target: msg.speaker, text: r.emoji, metadata: { score: r.score, messageId: msg.id } }).catch(() => {});
+          }
         }
       })().catch((err) => console.error("reaction failed", err)),
     );
@@ -82,6 +88,7 @@ async function handleTelegram(request: Request, env: Env, ctx: ExecutionContext,
   const msg = update.message && parseIncoming(update.message, agent, hostAgent(env));
   if (!msg || !isOwner(env, msg.fromId)) return new Response("ok");
   if (!msg.dmAgent && !groupAllowed(env, msg.chatId)) return new Response("ok");
+  if (!msg.dmAgent) ctx.waitUntil(setMessageReaction(env, hostAgent(env), msg.chatId, msg.messageId, "👀"));
   // Acknowledge Telegram immediately; the room schedules the discussion with alarms.
   ctx.waitUntil(room(env, msg.convId).handleMessage(msg).catch((err) => console.error("handleMessage failed", err)));
   return new Response("ok");
@@ -148,7 +155,7 @@ async function handleAdmin(request: Request, env: Env, url: URL): Promise<Respon
 }
 
 async function runScheduled(env: Env, ctx: ExecutionContext, at: Date): Promise<void> {
-  const store = new MemoryStore(env.DB, env.AI, env.VECTORIZE);
+  const store = new MemoryStore(env.DB, ensureAi(env), env.VECTORIZE);
   const frozen = await store.ops.isFrozen();
   const home = homeIdentity(env);
   for (const routine of dueRoutines(at)) {
@@ -191,7 +198,19 @@ export default {
       return new Response(renderApp(), {
         headers: {
           "content-type": "text/html; charset=utf-8",
+          "cache-control": "no-store, max-age=0",
           "content-security-policy": `default-src 'self'; script-src 'self' 'unsafe-inline' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self' wss://${url.host}; media-src 'self' blob: data:; img-src 'self' data:`,
+        },
+      });
+    }
+    if (request.method === "GET" && /^\/avatars\/[a-z]+\.webp$/.test(url.pathname)) {
+      const asset = await env.BACKUPS?.get(`assets${url.pathname}`);
+      if (!asset) return new Response("not found", { status: 404 });
+      return new Response(asset.body, {
+        headers: {
+          "content-type": "image/webp",
+          "cache-control": "public, max-age=604800, immutable",
+          etag: asset.httpEtag,
         },
       });
     }

@@ -71,7 +71,22 @@ export function parseIds(list: string): string[] {
 
 export function isOwner(env: Env, userId: number): boolean {
   const owners = parseIds(env.OWNER_USER_IDS);
-  return owners.length === 0 || owners.includes(String(userId));
+  // Fail closed when the deployment has not been configured yet. Treating an empty
+  // allowlist as "everyone" would expose paid model calls and write-capable skills to
+  // any Telegram user who discovers one of the bots.
+  return owners.includes(String(userId));
+}
+
+interface TelegramSticker {
+  file_id: string;
+  emoji?: string;
+  is_animated?: boolean;
+  is_video?: boolean;
+}
+
+interface TelegramStickerSet {
+  name: string;
+  stickers: TelegramSticker[];
 }
 
 /**
@@ -97,6 +112,7 @@ export function parseIncoming(msg: TelegramMessage, viaAgent: AgentId, host: Age
   if (!text && !imageFileId && !voiceFileId && !document) return null;
 
   const replyFrom = msg.reply_to_message?.from;
+  const replyText = msg.reply_to_message?.text ?? msg.reply_to_message?.caption;
   return {
     chatId: msg.chat.id,
     convId: isPrivate ? dmConvId(msg.from.id, viaAgent) : msg.chat.id,
@@ -109,6 +125,9 @@ export function parseIncoming(msg: TelegramMessage, viaAgent: AgentId, host: Age
     voiceFileId,
     document,
     replyToAgent: replyFrom?.is_bot ? agentFromUsername(replyFrom.username) : undefined,
+    replyToMessageId: msg.reply_to_message?.message_id,
+    replyToSpeakerName: replyFrom?.first_name,
+    replyToText: replyText?.slice(0, 1000),
   };
 }
 
@@ -214,7 +233,13 @@ async function sendFormatted(
   markdown: string,
   prefix: string,
   replyMarkup?: { inline_keyboard: InlineKeyboard },
+  replyToMessageId?: number,
+  fallbackReplyToMessageId?: number,
 ): Promise<number> {
+  // Never let Telegram silently discard a requested native quote. When a separate
+  // agent bot cannot yet see another bot's post, retry against the founder's root
+  // message; after Bot-to-Bot mode is enabled the preferred target succeeds.
+  const replyParameters = replyToMessageId ? { message_id: replyToMessageId, allow_sending_without_reply: false } : undefined;
   try {
     const sent = await call<{ message_id: number }>(token, "sendMessage", {
       chat_id: chatId,
@@ -222,15 +247,25 @@ async function sendFormatted(
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
       reply_markup: replyMarkup,
+      reply_parameters: replyParameters,
     });
     return sent.message_id;
   } catch (err) {
+    if (
+      err instanceof TelegramError &&
+      /message to be replied not found/i.test(err.description) &&
+      fallbackReplyToMessageId &&
+      fallbackReplyToMessageId !== replyToMessageId
+    ) {
+      return sendFormatted(token, chatId, markdown, prefix, replyMarkup, fallbackReplyToMessageId);
+    }
     if (!(err instanceof TelegramError) || !/parse|entit|tag/i.test(err.description)) throw err;
     const plainPrefix = prefix.replace(/<[^>]+>/g, "");
     const sent = await call<{ message_id: number }>(token, "sendMessage", {
       chat_id: chatId,
       text: plainPrefix + markdown,
       reply_markup: replyMarkup,
+      reply_parameters: replyParameters,
     });
     return sent.message_id;
   }
@@ -243,6 +278,8 @@ export async function sendAs(
   chatId: number,
   markdown: string,
   replyMarkup?: { inline_keyboard: InlineKeyboard },
+  replyToMessageId?: number,
+  fallbackReplyToMessageId?: number,
 ): Promise<number | undefined> {
   const { token, own } = tokenFor(env, agent);
   const prefix = own ? "" : namePrefix(agent);
@@ -251,7 +288,15 @@ export async function sendAs(
   let firstId: number | undefined;
   for (const [i, chunk] of chunks.entries()) {
     const last = i === chunks.length - 1;
-    const id = await sendFormatted(token, chatId, chunk, i === 0 ? prefix : "", last ? replyMarkup : undefined);
+    const id = await sendFormatted(
+      token,
+      chatId,
+      chunk,
+      i === 0 ? prefix : "",
+      last ? replyMarkup : undefined,
+      i === 0 ? replyToMessageId : undefined,
+      i === 0 ? fallbackReplyToMessageId : undefined,
+    );
     firstId ??= id;
   }
   return firstId;
@@ -284,15 +329,38 @@ export async function sendSystemHtml(
   return sent.message_id;
 }
 
-export async function sendVoiceAs(env: Env, agent: AgentId, chatId: number, ogg: Uint8Array, caption?: string): Promise<number> {
+export async function sendVoiceAs(
+  env: Env,
+  agent: AgentId,
+  chatId: number,
+  ogg: Uint8Array,
+  caption?: string,
+  replyToMessageId?: number,
+  fallbackReplyToMessageId?: number,
+): Promise<number> {
   const { token, own } = tokenFor(env, agent);
   const form = new FormData();
   form.set("chat_id", String(chatId));
   form.set("voice", new Blob([ogg], { type: "audio/ogg" }), `${agent}.ogg`);
   const text = (own ? "" : `${AGENTS[agent].emoji} ${AGENTS[agent].name}: `) + (caption ?? "");
   if (text) form.set("caption", text.slice(0, LIMITS.telegramMaxCaption));
-  const sent = await callMultipart<{ message_id: number }>(token, "sendVoice", form);
-  return sent.message_id;
+  if (replyToMessageId) form.set("reply_parameters", JSON.stringify({ message_id: replyToMessageId, allow_sending_without_reply: false }));
+  try {
+    const sent = await callMultipart<{ message_id: number }>(token, "sendVoice", form);
+    return sent.message_id;
+  } catch (err) {
+    if (
+      err instanceof TelegramError &&
+      /message to be replied not found/i.test(err.description) &&
+      fallbackReplyToMessageId &&
+      fallbackReplyToMessageId !== replyToMessageId
+    ) {
+      form.set("reply_parameters", JSON.stringify({ message_id: fallbackReplyToMessageId, allow_sending_without_reply: false }));
+      const sent = await callMultipart<{ message_id: number }>(token, "sendVoice", form);
+      return sent.message_id;
+    }
+    throw err;
+  }
 }
 
 /** Returns the file_id of the largest size Telegram stored, so the image can be fetched again later. */
@@ -325,6 +393,73 @@ export async function answerCallback(env: Env, via: AgentId, callbackId: string,
   const token = botToken(env, via);
   if (!token) return;
   await call(token, "answerCallbackQuery", { callback_query_id: callbackId, text }).catch(() => {});
+}
+
+/**
+ * Telegram clears chat actions after at most five seconds. Renew every four seconds
+ * until the caller confirms that the message was delivered or the turn failed.
+ */
+export function startChatActionHeartbeat(
+  env: Env,
+  agent: AgentId,
+  chatId: number,
+  action: "typing" | "record_voice" = "typing",
+): () => void {
+  let stopped = false;
+  const pulse = () => {
+    if (!stopped) void sendTyping(env, agent, chatId, action);
+  };
+  pulse();
+  const timer = setInterval(pulse, 4_000);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
+const DEFAULT_CONTEXT_STICKER_SETS = ["HotCherry", "UtyaDuck", "TidyTieTom"];
+const stickerCache = new Map<string, Promise<TelegramStickerSet | null>>();
+
+async function stickerSet(token: string, agent: AgentId, name: string): Promise<TelegramStickerSet | null> {
+  const key = `${agent}:${name}`;
+  let pending = stickerCache.get(key);
+  if (!pending) {
+    pending = call<TelegramStickerSet>(token, "getStickerSet", { name }).catch(() => null);
+    stickerCache.set(key, pending);
+  }
+  return pending;
+}
+
+/** Send a matching Telegram sticker as the speaking agent. Animated/video stickers are preferred. */
+export async function sendContextStickerAs(env: Env, agent: AgentId, chatId: number, emoji: string): Promise<number | undefined> {
+  const { token } = tokenFor(env, agent);
+  const configured = (env.TELEGRAM_STICKER_SETS ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const names = [...new Set([...configured, ...DEFAULT_CONTEXT_STICKER_SETS])];
+  const matches: TelegramSticker[] = [];
+  for (const name of names) {
+    const set = await stickerSet(token, agent, name);
+    if (!set) continue;
+    matches.push(...set.stickers.filter((sticker) => sticker.emoji?.includes(emoji)));
+  }
+  if (!matches.length) return undefined;
+  matches.sort((a, b) => Number(!!b.is_animated || !!b.is_video) - Number(!!a.is_animated || !!a.is_video));
+  const seed = [...`${agent}:${chatId}:${emoji}`].reduce((sum, char) => (sum * 31 + char.charCodeAt(0)) >>> 0, 7);
+  const preferred = matches.filter((sticker) => sticker.is_animated || sticker.is_video);
+  const pool = preferred.length ? preferred : matches;
+  const sticker = pool[seed % pool.length]!;
+  const sent = await call<{ message_id: number }>(token, "sendSticker", { chat_id: chatId, sticker: sticker.file_id });
+  return sent.message_id;
+}
+
+/** Lightweight acknowledgement/reaction without adding another chat message. */
+export async function setMessageReaction(env: Env, agent: AgentId, chatId: number, messageId: number, emoji?: string): Promise<void> {
+  const token = botToken(env, agent) ?? botToken(env, hostAgent(env));
+  if (!token) return;
+  const reaction = emoji ? [{ type: "emoji", emoji }] : [];
+  await call(token, "setMessageReaction", { chat_id: chatId, message_id: messageId, reaction, is_big: false }).catch(() => {});
 }
 
 export async function editMessageHtml(env: Env, via: AgentId, chatId: number, messageId: number, html: string): Promise<void> {

@@ -138,6 +138,37 @@ describe("runAgentTurn", () => {
     expect(await runAgentTurn(req, ctx("nova", ai, fakeStore()))).toBeNull();
   });
 
+  it("moves a selected live speaker from PASS to its configured fallback", async () => {
+    const { ai, calls } = fakeAi({
+      [AGENTS.axiom.voiceModel]: [{ response: "[PASS]" }],
+      [AGENTS.axiom.fallbackModel]: [{ response: "The product question is whether traders will trust the signal enough to act on it." }],
+    });
+    const answer = await runAgentTurn(
+      { ...req, mode: "live", speaking: true, fastInteractive: true, preferPrimaryModel: true, mustRespond: true },
+      ctx("axiom", ai, fakeStore()),
+    );
+    expect(answer).toContain("trust the signal");
+    expect(calls.map((call) => call.model)).toEqual([AGENTS.axiom.voiceModel, AGENTS.axiom.fallbackModel]);
+  });
+
+  it("rescues a manual floor handoff using the prior substantive founder message", async () => {
+    const floorTranscript = [
+      { chatId: -100, discussionId: 1, speaker: "human" as const, speakerName: "Dam", text: "Should we sell trading predictions or use them ourselves?", createdAt: 0 },
+      { chatId: -100, discussionId: 2, speaker: "human" as const, speakerName: "Dam", text: "Axiom, take the floor and respond to the conversation's latest unresolved point.", createdAt: 1 },
+    ];
+    const { ai, calls } = fakeAi({
+      [AGENTS.axiom.voiceModel]: [{ response: "[PASS]" }],
+      [AGENTS.axiom.fallbackModel]: [{ response: "Use it internally first." }],
+    });
+    await runAgentTurn(
+      { ...req, transcript: floorTranscript, mode: "live", speaking: true, fastInteractive: true, preferPrimaryModel: true, mustRespond: true },
+      ctx("axiom", ai, fakeStore()),
+    );
+    const rescuePrompt = calls[1]!.input.messages.at(-1).content;
+    expect(rescuePrompt).toContain("sell trading predictions or use them ourselves");
+    expect(rescuePrompt).not.toContain("latest words were: “Axiom, take the floor");
+  });
+
   it("refuses to run over the daily budget", async () => {
     const { ai } = fakeAi({});
     const c = ctx("atlas", ai, fakeStore({ tokensToday: async () => 500 }), { DAILY_TOKEN_BUDGET_PER_AGENT: "400" });

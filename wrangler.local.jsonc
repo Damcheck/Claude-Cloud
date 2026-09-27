@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ai-council-local",
+  "account_id": "57fcd103902759f319eb0a9093d71b4c",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Local D1 and Durable Objects run entirely on this PC. Workers AI is called
+  // through the local REST adapter so this mode needs only a Workers AI API token.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "ai-council",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "COUNCIL_ROOM", "class_name": "CouncilRoom" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CouncilRoom"] }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+
+  "vars": {
+    "ALLOWED_CHAT_IDS": "",
+    "OWNER_USER_IDS": "",
+    "HOME_CHAT_ID": "",
+    "HOST_AGENT": "nexus",
+    "STRICT_BOT_IDENTITIES": "true",
+    "AI_GATEWAY_ID": "",
+    "DAILY_TOKEN_BUDGET_PER_AGENT": "0",
+    "PUBLIC_URL": "",
+    "MINIAPP_URL": "",
+    "GITHUB_REPOS": "",
+    "MCP_SERVERS": "",
+    "SHOPIFY_STORE": "",
+    "SHOPIFY_THEME_ID": "",
+    "OWNER_PHONE_NUMBERS": ""
+  }
+}

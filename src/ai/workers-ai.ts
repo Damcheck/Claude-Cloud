@@ -45,9 +45,68 @@ export interface CallOptions {
   gatewayId?: string;
   /** Shown in AI Gateway logs, e.g. { agent: "atlas" }. */
   metadata?: Record<string, string | number>;
+  /** Stop waiting for an interactive model that has become too slow. */
+  timeoutMs?: number;
+  /** Provider-native reasoning control where the selected model supports it. */
+  reasoningMode?: ReasoningMode;
+}
+
+/** Translate the council's portable depth into each provider's supported API shape. */
+export function reasoningParameters(model: string, mode?: ReasoningMode): Record<string, unknown> {
+  if (!mode) return {};
+  if (model.includes("qwen3.8")) {
+    return { reasoning_effort: mode === "fast" ? "low" : mode === "deep" ? "xhigh" : "medium" };
+  }
+  if (model.includes("deepseek-v4")) {
+    return { reasoning_effort: mode === "fast" ? "low" : mode === "deep" ? "high" : "medium" };
+  }
+  if (model.includes("kimi-k2.6")) {
+    return { chat_template_kwargs: { thinking: mode !== "fast" } };
+  }
+  return {};
 }
 
 type RunFn = (model: string, input: unknown, options?: AiOptions) => Promise<unknown>;
+
+interface RestAiEnv {
+  AI?: Ai;
+  LOCAL_CF_ACCOUNT_ID?: string;
+  LOCAL_CF_API_TOKEN?: string;
+}
+
+/**
+ * Use the native Workers AI binding in production. In local-lite development the
+ * binding is deliberately absent, so call the same Cloudflare-hosted models through
+ * the REST API with a narrowly scoped Workers AI token instead.
+ */
+export function ensureAi(env: RestAiEnv): Ai {
+  if (env.AI) return env.AI;
+  const accountId = env.LOCAL_CF_ACCOUNT_ID;
+  const token = env.LOCAL_CF_API_TOKEN;
+  if (!accountId || !token) throw new Error("Workers AI is not configured. Set LOCAL_CF_ACCOUNT_ID and LOCAL_CF_API_TOKEN for local development.");
+
+  const client = {
+    async run(model: string, input: unknown): Promise<unknown> {
+      const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/run/${model}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("json")) {
+        if (!response.ok) throw new Error(`Workers AI REST ${response.status}: ${(await response.text()).slice(0, 300)}`);
+        return new Uint8Array(await response.arrayBuffer());
+      }
+      const payload = (await response.json()) as { success?: boolean; result?: unknown; errors?: { message?: string }[] };
+      if (!response.ok || payload.success === false) {
+        throw new Error(`Workers AI REST ${response.status}: ${payload.errors?.map((e) => e.message).filter(Boolean).join("; ") || "request failed"}`);
+      }
+      return payload.result;
+    },
+  } as unknown as Ai;
+  env.AI = client;
+  return client;
+}
 
 function aiOptions(opts?: CallOptions): AiOptions | undefined {
   if (!opts?.gatewayId) return undefined;
@@ -68,7 +127,21 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function run(ai: Ai, model: string, input: unknown, opts?: CallOptions): Promise<unknown> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await (ai.run as unknown as RunFn).call(ai, model, input, aiOptions(opts));
+      const request = (ai.run as unknown as RunFn).call(ai, model, input, aiOptions(opts));
+      if (!opts?.timeoutMs) return await request;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          request,
+          new Promise<never>((_, reject) => {
+            // Deliberately avoid the words "timed out": this is our local latency
+            // deadline, not a transient provider timeout that should be retried.
+            timer = setTimeout(() => reject(new Error(`interactive deadline exceeded after ${opts.timeoutMs}ms`)), opts.timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
     } catch (err) {
       const delay = RETRY_DELAYS_MS[attempt];
       if (delay === undefined || !isRetryable(err)) throw err;
@@ -122,10 +195,14 @@ export function normalizeChatOutput(out: unknown): ChatResult {
   const o = (out ?? {}) as Record<string, any>;
   const usage = normalizeUsage(o.usage);
   const message = o.choices?.[0]?.message;
+  const text = (value: unknown): string => {
+    if (value == null) return "";
+    return typeof value === "string" ? value : JSON.stringify(value);
+  };
   if (message) {
-    return { text: String(message.content ?? ""), toolCalls: normalizeToolCalls(message.tool_calls), usage };
+    return { text: text(message.content), toolCalls: normalizeToolCalls(message.tool_calls), usage };
   }
-  return { text: String(o.response ?? ""), toolCalls: normalizeToolCalls(o.tool_calls), usage };
+  return { text: text(o.response), toolCalls: normalizeToolCalls(o.tool_calls), usage };
 }
 
 export async function runChat(
@@ -134,7 +211,7 @@ export async function runChat(
   messages: ChatMessage[],
   opts: { tools?: ToolDefinition[]; maxTokens: number } & CallOptions,
 ): Promise<ChatResult> {
-  const input: Record<string, unknown> = { messages, max_tokens: opts.maxTokens };
+  const input: Record<string, unknown> = { messages, max_tokens: opts.maxTokens, ...reasoningParameters(model, opts.reasoningMode) };
   if (opts.tools?.length) input.tools = opts.tools;
   return normalizeChatOutput(await run(ai, model, input, opts));
 }
@@ -199,8 +276,8 @@ export async function transcribe(ai: Ai, model: string, audio: Uint8Array, opts?
 
 export interface SpeechOptions {
   speaker: string;
-  /** "ogg-opus" for Telegram voice bubbles, "mp3" for browsers, "mulaw-8k" for phone calls. */
-  format: "ogg-opus" | "mp3" | "mulaw-8k";
+  /** Telegram voice bubbles, high-fidelity browser audio, or phone μ-law. */
+  format: "ogg-opus" | "wav-48k" | "mulaw-8k";
 }
 
 /** Text → audio bytes. Handles every output shape the TTS binding may return. */
@@ -210,7 +287,7 @@ export async function speak(ai: Ai, model: string, text: string, speech: SpeechO
       ? { text, speaker: speech.speaker, encoding: "opus", container: "ogg" }
       : speech.format === "mulaw-8k"
         ? { text, speaker: speech.speaker, encoding: "mulaw", sample_rate: 8000, container: "none" }
-        : { text, speaker: speech.speaker, encoding: "mp3" };
+        : { text, speaker: speech.speaker, encoding: "linear16", sample_rate: 48000, container: "wav" };
   return audioBytes(await run(ai, model, input, opts));
 }
 
@@ -233,3 +310,4 @@ export async function embed(ai: Ai, model: string, texts: string[], opts?: CallO
   const out = (await run(ai, model, { text: texts }, opts)) as { data?: number[][] };
   return out?.data ?? [];
 }
+import type { ReasoningMode } from "../types";

@@ -2,6 +2,7 @@ import { embed } from "../ai/workers-ai";
 import { SYSTEM_MODELS } from "../config";
 import type { AgentId, Mode, TranscriptMessage } from "../types";
 import { OpsStore } from "./ops";
+import { CouncilOsStore } from "./council-os";
 
 /**
  * All D1 / Vectorize access goes through here.
@@ -55,6 +56,7 @@ export function utcDay(ts = Date.now()): string {
 export class MemoryStore {
   /** v3 tables: autonomy, audit, missions, watchers, learning, graph, tools, evals. */
   readonly ops: OpsStore;
+  readonly councilOs: CouncilOsStore;
 
   constructor(
     private db: D1Database,
@@ -62,6 +64,7 @@ export class MemoryStore {
     private vectors?: VectorizeIndex,
   ) {
     this.ops = new OpsStore(db);
+    this.councilOs = new CouncilOsStore(db);
   }
 
   get hasVectors(): boolean {
@@ -154,7 +157,7 @@ export class MemoryStore {
   async recentMessages(convId: number, limit: number): Promise<TranscriptMessage[]> {
     const { results } = await this.db
       .prepare(
-        "SELECT id, chat_id, discussion_id, speaker, speaker_name, text, created_at FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
+        "SELECT id, chat_id, discussion_id, speaker, speaker_name, text, telegram_message_id, created_at FROM messages WHERE chat_id = ? ORDER BY id DESC LIMIT ?",
       )
       .bind(convId, limit)
       .all<Record<string, any>>();
@@ -164,7 +167,7 @@ export class MemoryStore {
   async discussionMessages(discussionId: number): Promise<TranscriptMessage[]> {
     const { results } = await this.db
       .prepare(
-        "SELECT id, chat_id, discussion_id, speaker, speaker_name, text, created_at FROM messages WHERE discussion_id = ? ORDER BY id",
+        "SELECT id, chat_id, discussion_id, speaker, speaker_name, text, telegram_message_id, created_at FROM messages WHERE discussion_id = ? ORDER BY id",
       )
       .bind(discussionId)
       .all<Record<string, any>>();
@@ -433,11 +436,24 @@ export class MemoryStore {
   }
 
   async resolvePrediction(id: number, agent: AgentId, status: "right" | "wrong" | "unclear", note: string): Promise<boolean> {
+    const prediction = await this.db
+      .prepare("SELECT conv_id, claim FROM predictions WHERE id = ? AND agent = ? AND status = 'open'")
+      .bind(id, agent)
+      .first<{ conv_id: number; claim: string }>();
+    if (!prediction) return false;
     const res = await this.db
-      .prepare("UPDATE predictions SET status = ?, outcome_note = ?, resolved_at = ? WHERE id = ? AND agent = ?")
+      .prepare("UPDATE predictions SET status = ?, outcome_note = ?, resolved_at = ? WHERE id = ? AND agent = ? AND status = 'open'")
       .bind(status, note, Date.now(), id, agent)
       .run();
-    return (res.meta.changes ?? 0) > 0;
+    const changed = (res.meta.changes ?? 0) > 0;
+    if (changed && status !== "unclear") {
+      const right = status === "right";
+      await Promise.all([
+        this.councilOs.reputationEvent(prediction.conv_id, agent, "accuracy", right ? 1.5 : -1.5, `Prediction #${id} resolved ${status}: ${prediction.claim.slice(0, 160)}`, "prediction", id),
+        this.councilOs.reputationEvent(prediction.conv_id, agent, right ? "wins" : "losses", 1, `Prediction #${id} resolved ${status}`, "prediction", id),
+      ]).catch((err) => console.warn("prediction reputation failed", err));
+    }
+    return changed;
   }
 
   async trackRecord(agent: AgentId): Promise<TrackRecord> {
@@ -550,5 +566,6 @@ function rowToMessage(r: Record<string, any>): TranscriptMessage {
     speakerName: r.speaker_name,
     text: r.text,
     createdAt: r.created_at,
+    telegramMessageId: r.telegram_message_id ?? undefined,
   };
 }
