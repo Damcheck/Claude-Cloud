@@ -85,4 +85,14 @@ describe("semantic conversation director", () => {
     if (command.kind !== "discuss") throw new Error("expected discussion");
     expect(command.steps[0]?.agents).toEqual(available);
   });
+
+  it("disables tools only for greetings and live calls", () => {
+    const social = directedCommand({ intent: "social", agents: ["atlas"], reason: "greeting", reasoning: "fast" }, available, false);
+    const build = directedCommand({ intent: "build", agents: ["cipher"], reason: "implementation", reasoning: "deep" }, available, false);
+    const live = directedCommand({ intent: "answer", agents: ["atlas"], reason: "call", reasoning: "normal" }, available, true);
+    if (social.kind !== "discuss" || build.kind !== "discuss" || live.kind !== "discuss") throw new Error("expected discussions");
+    expect(social.steps.every((step) => step.tools === false)).toBe(true);
+    expect(build.steps.every((step) => step.tools !== false)).toBe(true);
+    expect(live.steps.every((step) => step.tools === false)).toBe(true);
+  });
 });

@@ -183,6 +183,31 @@ describe("runAgentTurn", () => {
     expect(calls[0]!.input.messages[0].content).toContain("SPEAKING");
   });
 
+  it("keeps skills available in fast text conversation when the director allows them", async () => {
+    const { ai, calls } = fakeAi({
+      [AGENTS.sage.model]: [
+        { tool_calls: [{ name: "claims_record", arguments: { claim: "The build failed", claimed_by: "founder", verdict: "unclear" } }] },
+        { response: "I logged the failure claim so we can verify it." },
+      ],
+    });
+    await runAgentTurn(
+      { ...req, fastInteractive: true, preferPrimaryModel: true, toolsAllowed: true },
+      ctx("sage", ai, fakeStore()),
+    );
+    expect(calls[0]!.input.tools).toEqual(expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: "claims_record" }) })]));
+  });
+
+  it("asks for a compact complete answer up front without chopping returned code", async () => {
+    const complete = `Plan:\n\n\`\`\`ts\n${"const working = true;\n".repeat(30)}\`\`\``;
+    const { ai, calls } = fakeAi({ [AGENTS.cipher.model]: [{ response: complete }] });
+    const answer = await runAgentTurn(
+      { ...req, maxOutputTokens: 24, fastInteractive: true, preferPrimaryModel: true },
+      ctx("cipher", ai, fakeStore()),
+    );
+    expect(answer).toBe(complete);
+    expect(JSON.stringify(calls[0]!.input.messages)).toContain("never cut it off");
+  });
+
   it("sends the image to vision models and a description to the others", async () => {
     const image = "data:image/png;base64,AAAA";
     const vision = fakeAi({ [AGENTS.axiom.model]: [{ response: "The CTA is below the fold." }] });

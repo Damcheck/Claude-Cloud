@@ -28,6 +28,8 @@ export interface Step {
   primaryModel?: boolean;
   /** Adaptive thinking depth selected from the founder's intent and task complexity. */
   reasoning?: ReasoningMode;
+  /** Offer this agent its configured skills. Live calls and greetings disable them for latency. */
+  tools?: boolean;
 }
 
 /** Commands the room answers from its database, without asking a model. */
@@ -255,7 +257,7 @@ const INTRODUCE_EVERYONE =
   /\b(introduce yourselves|introduce (?:all|everyone|everybody|each member)|(?:everyone|everybody|all (?:of you|agents?|members?)|each (?:of you|agent|member))[^.!?]{0,50}\bintroduce|meet the (?:whole )?(?:team|council)|who (?:is|are) everyone)\b/i;
 
 function everyoneStep(instruction: string, fallback?: Step["fallback"]): Step[] {
-  return [{ agents: [...ALL_CHAT_AGENTS], parallel: true, turn: "normal", instruction, fallback }];
+  return [{ agents: [...ALL_CHAT_AGENTS], parallel: true, turn: "normal", instruction, fallback, primaryModel: true }];
 }
 
 /**
@@ -271,7 +273,7 @@ export function planForMode(mode: Mode, specialists: AgentId[], chosen: AgentId[
   switch (mode) {
     case "direct":
       // Only Iris joins uninvited, because the addressed agent may need to know what's in the image.
-      return [{ agents: withSpecialists(chosen, specialists.filter((s) => s === "iris")), parallel: false, turn: "normal" }];
+      return [{ agents: withSpecialists(chosen, specialists.filter((s) => s === "iris")), parallel: false, turn: "normal", primaryModel: true }];
     case "council":
       return [
         ...irisFirst,
@@ -301,7 +303,7 @@ export function planForMode(mode: Mode, specialists: AgentId[], chosen: AgentId[
     case "critic":
       return [...irisFirst, { agents: uniq([...core, ...nonIris]), parallel: false, turn: "normal" }];
     case "chat":
-      return [{ agents: withSpecialists(chosen, specialists), parallel: false, turn: "normal" }];
+      return [{ agents: withSpecialists(chosen, specialists), parallel: false, turn: "normal", primaryModel: true }];
     case "live":
       return [{ agents: chosen, parallel: false, turn: "normal" }];
   }
@@ -350,7 +352,7 @@ function discuss(mode: Mode, topic: string, steps: Step[]): Command {
 function forDm(cmd: Command, dmAgent: AgentId): Command {
   if (cmd.kind !== "discuss") return cmd;
   const instruction = cmd.steps.find((s) => s.instruction)?.instruction;
-  const steps: Step[] = [{ agents: [dmAgent], parallel: false, turn: "normal", instruction }];
+  const steps: Step[] = [{ agents: [dmAgent], parallel: false, turn: "normal", instruction, primaryModel: true }];
   return discuss(cmd.mode === "chat" ? "direct" : cmd.mode, cmd.topic, steps);
 }
 
@@ -435,6 +437,7 @@ function routeCommand(msg: IncomingMessage, ctx: RouteContext): Command {
         agents: withSpecialists(implicit, specialists),
         parallel: false,
         turn: "normal",
+        primaryModel: true,
         instruction: "This is a natural continuation addressed to you from the immediately preceding conversation. Answer in context; do not restart, reintroduce yourself, or pretend the message is a new topic.",
       }],
     );

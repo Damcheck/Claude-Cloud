@@ -12,7 +12,7 @@ and learn from your feedback, all behind an autonomy policy you control.
 | ⚡ Sage | GLM-5.3 Flash | Fast challenger, fact checks, claim ledger, crux research |
 | 🔮 Nexus | Qwen 3.8 27B | Synthesis, minutes, missions planner, daily brief (host bot) |
 | 💠 Axiom | Gemma 4 26B A4B | Product/UX, browser audits, customer personas |
-| 💻 Cipher | Kimi K2.7 Code | Programmer: GitHub + sandbox + browser tests, builds tools |
+| 💻 Cipher | Kimi K2.7 Code | Programmer: GitHub, code review and browser tests |
 | 🏗️ Forge | GLM-5.3 | Principal engineer: reviews PRs and tools, CI investigations |
 | 👁️ Iris | Moondream 3.1 | Vision: images, OCR, screenshots, design comparisons |
 
@@ -39,8 +39,8 @@ personality changes; model scouting that proposes better models; calibrated fore
 buttons for PRs, deploys, missions, tools and model swaps, prompt-injection taint tracking,
 a full audit log, `/why`, an admin dashboard, daily token budgets, and backups.
 
-**Extend.** MCP connectors (Shopify, Supabase, Vercel, Sentry, …) and tools the council
-writes, reviews and runs in locked-down isolates.
+**Extend.** MCP connectors (Shopify, Supabase, Vercel, Sentry, …) and reviewed custom
+tools that run in locked-down Worker isolates.
 
 ## Commands
 
@@ -59,8 +59,7 @@ writes, reviews and runs in locked-down isolates.
 
 ## Setup
 
-Requires the Workers **Paid** plan. Docker must be running when you deploy (for the
-sandbox container); without it, use `npm run deploy:no-sandbox`.
+Requires the Workers **Paid** plan. No Docker or container deployment is required.
 
 ```bash
 npm install
@@ -117,13 +116,12 @@ can use the bots until at least one owner id is configured.
 ## Development
 
 ```bash
-npm test          # 148 tests: routing, policy, runner (fake AI), missions, forecasts,
+npm test          # 151 tests: routing, policy, runner (fake AI), missions, forecasts,
                   # watchers, voice codecs, Twilio/initData auth, MCP, tools, schedule, …
 npm run typecheck
 cp .dev.vars.example .dev.vars && npm run dev
 ```
 
 Pull requests and pushes to `main` run the same type-check, test suite, and a Wrangler
-dry-run bundle in GitHub Actions. The CI bundle skips container rollout because GitHub's
-hosted runner does not build the Sandbox image; a real deployment still requires Docker
-for the container or `npm run deploy:no-sandbox` when the existing image should remain.
+dry-run bundle in GitHub Actions. The checked-in avatars are uploaded automatically as
+Cloudflare Worker static assets during deployment.

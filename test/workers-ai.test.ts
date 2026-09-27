@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { describeVisionOutput, normalizeChatOutput, reasoningParameters } from "../src/ai/workers-ai";
+import { describeVisionOutput, normalizeChatOutput, reasoningParameters, runChat } from "../src/ai/workers-ai";
 
 describe("normalizeChatOutput", () => {
   it("reads the legacy { response, tool_calls } shape", () => {
@@ -41,5 +41,23 @@ describe("reasoningParameters", () => {
     expect(reasoningParameters("@cf/moonshotai/kimi-k2.6", "fast")).toEqual({ chat_template_kwargs: { thinking: false } });
     expect(reasoningParameters("@cf/moonshotai/kimi-k2.6", "normal")).toEqual({ chat_template_kwargs: { thinking: true } });
     expect(reasoningParameters("@cf/google/gemma-4-26b-a4b-it", "deep")).toEqual({});
+  });
+});
+
+describe("AI Gateway fallback", () => {
+  it("retries directly when a configured gateway is missing", async () => {
+    const options: unknown[] = [];
+    const ai = {
+      run: async (_model: string, _input: unknown, callOptions?: unknown) => {
+        options.push(callOptions);
+        if (callOptions) throw new Error("gateway not found");
+        return { response: "direct answer" };
+      },
+    } as unknown as Ai;
+    const result = await runChat(ai, "@cf/test/model", [{ role: "user", content: "hello" }], { maxTokens: 20, gatewayId: "default" });
+    expect(result.text).toBe("direct answer");
+    expect(options).toHaveLength(2);
+    expect(options[0]).toBeTruthy();
+    expect(options[1]).toBeUndefined();
   });
 });

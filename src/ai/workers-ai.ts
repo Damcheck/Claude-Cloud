@@ -125,26 +125,38 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Model ids are newer than the generated binding types, so call through an untyped signature. */
 async function run(ai: Ai, model: string, input: unknown, opts?: CallOptions): Promise<unknown> {
+  const invoke = async (options?: AiOptions): Promise<unknown> => {
+    const request = (ai.run as unknown as RunFn).call(ai, model, input, options);
+    if (!opts?.timeoutMs) return await request;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        request,
+        new Promise<never>((_, reject) => {
+          // Deliberately avoid the words "timed out": this is our local latency
+          // deadline, not a transient provider timeout that should be retried.
+          timer = setTimeout(() => reject(new Error(`interactive deadline exceeded after ${opts.timeoutMs}ms`)), opts.timeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+
   for (let attempt = 0; ; attempt++) {
     try {
-      const request = (ai.run as unknown as RunFn).call(ai, model, input, aiOptions(opts));
-      if (!opts?.timeoutMs) return await request;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        return await Promise.race([
-          request,
-          new Promise<never>((_, reject) => {
-            // Deliberately avoid the words "timed out": this is our local latency
-            // deadline, not a transient provider timeout that should be retried.
-            timer = setTimeout(() => reject(new Error(`interactive deadline exceeded after ${opts.timeoutMs}ms`)), opts.timeoutMs);
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      return await invoke(aiOptions(opts));
     } catch (err) {
       const delay = RETRY_DELAYS_MS[attempt];
-      if (delay === undefined || !isRetryable(err)) throw err;
+      if (delay === undefined || !isRetryable(err)) {
+        // A missing or misnamed Gateway must not take the entire council offline.
+        // Keep Gateway observability when it works, but fail open to the AI binding.
+        if (opts?.gatewayId) {
+          console.warn(`AI Gateway ${opts.gatewayId} failed for ${model}; retrying direct`, err);
+          return invoke(undefined);
+        }
+        throw err;
+      }
       await sleep(delay);
     }
   }
@@ -277,7 +289,7 @@ export async function transcribe(ai: Ai, model: string, audio: Uint8Array, opts?
 export interface SpeechOptions {
   speaker: string;
   /** Telegram voice bubbles, high-fidelity browser audio, or phone μ-law. */
-  format: "ogg-opus" | "wav-48k" | "mulaw-8k";
+  format: "ogg-opus" | "mp3" | "wav-48k" | "mulaw-8k";
 }
 
 /** Text → audio bytes. Handles every output shape the TTS binding may return. */
@@ -285,7 +297,9 @@ export async function speak(ai: Ai, model: string, text: string, speech: SpeechO
   const input =
     speech.format === "ogg-opus"
       ? { text, speaker: speech.speaker, encoding: "opus", container: "ogg" }
-      : speech.format === "mulaw-8k"
+      : speech.format === "mp3"
+        ? { text, speaker: speech.speaker, encoding: "mp3", container: "none", bit_rate: 48_000 }
+        : speech.format === "mulaw-8k"
         ? { text, speaker: speech.speaker, encoding: "mulaw", sample_rate: 8000, container: "none" }
         : { text, speaker: speech.speaker, encoding: "linear16", sample_rate: 48000, container: "wav" };
   return audioBytes(await run(ai, model, input, opts));

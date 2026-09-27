@@ -12,8 +12,7 @@
     "db:migrate": "wrangler d1 migrations apply ai-council --remote",
     "db:migrate:local": "wrangler d1 migrations apply ai-council --local",
     "telegram:setup": "node --env-file-if-exists=.dev.vars scripts/set-webhook.mjs",
-    "vectorize:create": "wrangler vectorize create ai-council-memory --dimensions=1024 --metric=cosine",
-    "deploy:no-sandbox": "wrangler deploy --containers-rollout=none"
+    "vectorize:create": "wrangler vectorize create ai-council-memory --dimensions=1024 --metric=cosine"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260925.2",

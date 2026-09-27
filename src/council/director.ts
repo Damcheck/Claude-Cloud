@@ -67,8 +67,17 @@ export function parseDirection(raw: string, available: readonly AgentId[]): Dire
   }
 }
 
-function step(agents: AgentId[], parallel: boolean, instruction: string, turn: Step["turn"] = "normal", maxTokens = 90, primaryModel = true, reasoning: ReasoningMode = "normal"): Step {
-  return { agents, parallel, turn, instruction, fast: true, maxTokens, primaryModel, reasoning };
+function step(
+  agents: AgentId[],
+  parallel: boolean,
+  instruction: string,
+  turn: Step["turn"] = "normal",
+  maxTokens = 90,
+  primaryModel = true,
+  reasoning: ReasoningMode = "normal",
+  tools = true,
+): Step {
+  return { agents, parallel, turn, instruction, fast: true, maxTokens, primaryModel, reasoning, tools };
 }
 
 /** Convert a semantic direction into a bounded discussion plan. */
@@ -84,12 +93,12 @@ export function directedCommand(direction: Direction, available: readonly AgentI
   if (direction.intent === "social") {
     const speakers = explicitAll ? chosen : chosen.slice(0, 2);
     const social = "Answer only the founder's newest casual line, literally and naturally, in 2–10 words. If they ask how you are, answer how you are and optionally ask back. Do not revive older topics or imitate another member's response. Never say ‘finally’, ‘some peace’, ‘some calm’, ‘about time’, or any variation of those phrases. Do not ask a business question.";
-    return { kind: "discuss", mode: live ? "live" : "chat", topic: "", agents: speakers, steps: speakers.map((agent) => step([agent], false, social, "normal", 35, true, "fast")) };
+    return { kind: "discuss", mode: live ? "live" : "chat", topic: "", agents: speakers, steps: speakers.map((agent) => step([agent], false, social, "normal", 35, true, "fast", false)) };
   }
 
   if (live) {
     const speakers = direction.intent === "all" || explicitAll ? availableIds : chosen.slice(0, direction.intent === "debate" ? 4 : 3);
-    return { kind: "discuss", mode: "live", topic: "", agents: speakers, steps: speakers.map((agent) => step([agent], false, `${goal} Speak naturally, react to earlier speakers, and complete one useful thought.`, "normal", 100, true, direction.reasoning)) };
+    return { kind: "discuss", mode: "live", topic: "", agents: speakers, steps: speakers.map((agent) => step([agent], false, `${goal} Speak naturally, react to earlier speakers, and complete one useful thought.`, "normal", 100, true, direction.reasoning, false)) };
   }
 
   if (direction.intent === "all") {

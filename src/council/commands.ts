@@ -53,11 +53,11 @@ export async function runSystemCommand(h: CommandHost, name: SystemCommand, arg:
       }
       const id = Number(arg.trim());
       if (Number.isInteger(id) && id > 0) {
-        return send((await store.councilOs.selectWorld(identity.convId, id)) ? `🌍 Switched to project world #${id}. Its memories, relationships and replay are now active.` : "That project world does not exist here.");
+        return send((await store.councilOs.selectWorld(identity.convId, id)) ? `🌍 Switched to project world #${id}. Its Council OS reputation, relationships and replay are now active; chat history and general agent memory remain shared.` : "That project world does not exist here.");
       }
       const [name, description = ""] = arg.split("|").map((v) => v.trim());
       const world = await store.councilOs.createWorld(identity.convId, name!, description);
-      return send(`🌍 Created and entered #${world.id} ${world.name}. Future Council OS state is isolated in this project world.`);
+      return send(`🌍 Created and entered #${world.id} ${world.name}. Council OS reputation, relationships and replay are isolated here; chat history and general agent memory remain shared.`);
     }
     case "reputation": {
       const os = await store.councilOs.snapshot(identity.convId);

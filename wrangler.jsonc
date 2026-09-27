@@ -8,6 +8,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "observability": { "enabled": true },
 
+  // Avatars deploy with the Worker and are served before the script at /avatars/*.
+  "assets": { "directory": "./assets" },
+
   "ai": { "binding": "AI" },
 
   "d1_databases": [

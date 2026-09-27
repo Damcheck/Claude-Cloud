@@ -11,5 +11,7 @@ describe("contextualStickerEmoji", () => {
 
   it("does not append generic media to ordinary technical discussion", () => {
     expect(contextualStickerEmoji("Review the database schema", "The index should cover chat_id and created_at.")).toBeNull();
+    expect(contextualStickerEmoji("We are losing money", "We need to stop the leak.")).toBeNull();
+    expect(contextualStickerEmoji("Sorry, I was late", "No problem.")).toBeNull();
   });
 });

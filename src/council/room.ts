@@ -613,6 +613,7 @@ export class CouncilRoom extends DurableObject<Env> {
           maxOutputTokens: step.maxTokens,
           preferPrimaryModel: !!step.primaryModel,
           reasoningMode: step.reasoning ?? "normal",
+          toolsAllowed: step.tools ?? plan.mode !== "live",
           // A scheduled step means this member was deliberately given the floor. Let the
           // router decide who stays silent; once selected, [PASS] must be repaired.
           mustRespond: true,
@@ -632,7 +633,9 @@ export class CouncilRoom extends DurableObject<Env> {
           return { agent, text, notice: null as string | null };
         } catch (err) {
           console.error(`${agent} turn failed`, err);
-          const notice = err instanceof BudgetExceeded ? `💸 ${displayName(agent)} hit its daily token budget.` : null;
+          const notice = err instanceof BudgetExceeded
+            ? `💸 ${displayName(agent)} hit its daily token budget.`
+            : `⚠️ ${displayName(agent)} couldn't respond. The failure is recorded in /admin.`;
           return { agent, text: null, notice };
         }
       };

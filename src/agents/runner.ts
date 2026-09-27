@@ -31,6 +31,8 @@ export interface TurnRequest {
   preferPrimaryModel?: boolean;
   /** Adaptive deliberation depth chosen for this particular turn. */
   reasoningMode?: ReasoningMode;
+  /** Whether configured skills may be offered to the model for this turn. */
+  toolsAllowed?: boolean;
   /** The room assigned this member the floor, so [PASS] is not an acceptable result. */
   mustRespond?: boolean;
   /** Evals / self-improvement: use this personality instead of the agent's own. */
@@ -131,24 +133,6 @@ export async function runAgentTurn(req: TurnRequest, ctx: SkillContext): Promise
   }
 }
 
-/** Give reasoning models room to think, then enforce the director's visible chat size. */
-export function boundVisibleReply(text: string | null, tokenBudget: number | undefined): string | null {
-  if (!text || !tokenBudget) return text;
-  const words = text.trim().split(/\s+/);
-  const maxWords = Math.max(8, Math.floor(tokenBudget * 0.72));
-  if (words.length <= maxWords) return text;
-  const candidate = words
-    .slice(0, maxWords)
-    .join(" ")
-    // A token cut after "Next steps: 1." looks broken and Telegram cannot recover
-    // the omitted list. Remove dangling enumeration before finding a safe sentence.
-    .replace(/(?:^|\s)(?:\d+\.|\d+\)|[-*])\s*$/, "")
-    .replace(/[\s:;,\-–—]+$/, "");
-  const sentenceEnd = Math.max(candidate.lastIndexOf("."), candidate.lastIndexOf("!"), candidate.lastIndexOf("?"));
-  if (sentenceEnd >= candidate.length * 0.45) return candidate.slice(0, sentenceEnd + 1);
-  return `${candidate.replace(/[,:;\-–—]+$/, "")}…`;
-}
-
 async function chatTurn(
   req: TurnRequest,
   ctx: SkillContext,
@@ -177,9 +161,13 @@ async function chatTurn(
     }
   }
 
-  // Interactive room conversation favours reliable human cadence. Deliberate commands
-  // and background work retain tools; natural chat/debate does not wait on tool loops.
-  const skills = live || req.fastInteractive ? [] : await resolveSkills(ctx.agent, ctx.env, ctx.store, { consultDepth: ctx.consultDepth });
+  // Live speech and casual greetings stay latency-first. Every other selected turn,
+  // including ordinary chat, mentions and DMs, keeps the member's real capabilities.
+  const skills = live || req.toolsAllowed === false ? [] : await resolveSkills(ctx.agent, ctx.env, ctx.store, { consultDepth: ctx.consultDepth });
+  const visibleWordTarget = req.maxOutputTokens ? Math.max(8, Math.floor(req.maxOutputTokens * 0.72)) : undefined;
+  const lengthInstruction = visibleWordTarget
+    ? `Keep the visible answer near ${visibleWordTarget} words and finish the thought. Be shorter when a short reply is natural. If correct code, commands, or a complete step list genuinely needs more space, include it in full; never cut it off.`
+    : "";
   const promptInput = {
     agent: ctx.agent,
     mode: req.mode,
@@ -189,7 +177,7 @@ async function chatTurn(
     groupFacts,
     privateMemories,
     skillSummaries: skills.map((s) => `${s.id}: ${s.description}`),
-    instruction: req.instruction,
+    instruction: [req.instruction, lengthInstruction].filter(Boolean).join("\n\n"),
     speaking: req.speaking,
     trackRecord: trackRecord.right + trackRecord.wrong + trackRecord.open > 0 ? trackRecord : undefined,
     personality: req.personalityOverride ?? agent.personality,
@@ -271,7 +259,7 @@ async function chatTurn(
 
   const finishText = async (raw: string): Promise<string | null> => {
     const cleaned = cleanReply(ctx.agent, raw);
-    if (cleaned || !req.mustRespond) return boundVisibleReply(cleaned, req.maxOutputTokens);
+    if (cleaned || !req.mustRespond) return cleaned;
     // The member was explicitly given the floor. Reject a silent [PASS] once and ask
     // for a compact direct answer; if the provider still fails, return a human-visible
     // acknowledgement instead of making the council appear offline.
@@ -294,7 +282,7 @@ async function chatTurn(
       try {
         const forced = await call(false);
         const repaired = cleanReply(ctx.agent, forced.text);
-        if (repaired) return boundVisibleReply(repaired, req.maxOutputTokens);
+        if (repaired) return repaired;
       } catch {
         // `call` already advanced through provider errors. A final empty result is
         // better omitted than posting the same canned failure sentence in a loop.

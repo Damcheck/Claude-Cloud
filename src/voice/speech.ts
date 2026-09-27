@@ -28,7 +28,7 @@ export async function* speechStream(ai: Ai, agent: AgentId, markdown: string, op
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        bytes = await speak(ai, SYSTEM_MODELS.textToSpeech, text, { speaker: AGENTS[agent].voice, format: "wav-48k" }, opts);
+        bytes = await speak(ai, SYSTEM_MODELS.textToSpeech, text, { speaker: AGENTS[agent].voice, format: "mp3" }, opts);
         break;
       } catch (err) {
         lastError = err;

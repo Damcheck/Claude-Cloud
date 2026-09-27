@@ -29,7 +29,6 @@ import { handleGithubWebhook, runDueWatchers } from "./watchers/watchers";
 export { CouncilRoom } from "./council/room";
 export { CouncilJob } from "./jobs/workflow";
 export { ToolEgress } from "./tools/egress";
-export { Sandbox } from "@cloudflare/sandbox";
 
 function groupAllowed(env: Env, chatId: number): boolean {
   const allowed = parseIds(env.ALLOWED_CHAT_IDS);
